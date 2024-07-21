@@ -17,6 +17,7 @@ fn main() {
         .add_plugins(CharacterControllerPlugin)
         .insert_resource(Gravity(Vector::NEG_Y * 1000.))
         .add_systems(Startup, setup)
+        .add_systems(Update, camera_smooth_follow_player)
         .run();
 }
 
@@ -56,4 +57,25 @@ fn setup(mut commands: Commands) {
         RigidBody::Static,
         Collider::rectangle(1000., 4.),
     ));
+}
+
+fn camera_smooth_follow_player(
+    mut cameras: Query<&mut Transform, With<Camera2d>>,
+    player: Query<&Transform, (With<Player>, Without<Camera2d>)>,
+) {
+    let player = player.single();
+
+    for mut camera in &mut cameras {
+        let translation = &mut camera.translation;
+        translation.x = lerp(translation.x, player.translation.x, 0.1);
+        translation.y = lerp(translation.y, player.translation.y, 0.1);
+        translation.z = lerp(translation.z, player.translation.z, 0.1);
+    }
+}
+
+fn lerp<N>(a: N, b: N, t: N) -> N
+where
+    N: std::ops::Add<Output = N> + std::ops::Sub<Output = N> + std::ops::Mul<Output = N> + Copy,
+{
+    a + (b - a) * t
 }
