@@ -3,6 +3,7 @@ use bevy::prelude::*;
 use character_controller::{CharacterControllerBundle, CharacterControllerPlugin};
 
 mod character_controller;
+mod level0;
 
 #[derive(Component)]
 struct Player;
@@ -44,19 +45,7 @@ fn setup(mut commands: Commands) {
         ColliderDensity(2.),
     ));
 
-    commands.spawn((
-        SpriteBundle {
-            sprite: Sprite {
-                color: Color::srgb(1., 1., 1.),
-                custom_size: Some(Vec2::new(1000., 4.)),
-                ..default()
-            },
-            transform: Transform::from_xyz(0., 0., 0.),
-            ..default()
-        },
-        RigidBody::Static,
-        Collider::rectangle(1000., 4.),
-    ));
+    level0::setup(commands);
 }
 
 fn camera_smooth_follow_player(
@@ -66,16 +55,6 @@ fn camera_smooth_follow_player(
     let player = player.single();
 
     for mut camera in &mut cameras {
-        let translation = &mut camera.translation;
-        translation.x = lerp(translation.x, player.translation.x, 0.1);
-        translation.y = lerp(translation.y, player.translation.y, 0.1);
-        translation.z = lerp(translation.z, player.translation.z, 0.1);
+        camera.translation = camera.translation.lerp(player.translation, 0.1);
     }
-}
-
-fn lerp<N>(a: N, b: N, t: N) -> N
-where
-    N: std::ops::Add<Output = N> + std::ops::Sub<Output = N> + std::ops::Mul<Output = N> + Copy,
-{
-    a + (b - a) * t
 }
