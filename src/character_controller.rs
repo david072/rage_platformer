@@ -12,7 +12,7 @@ impl Plugin for CharacterControllerPlugin {
                 keyboard_input,
                 update_grounded,
                 movement,
-                apply_movement_damping,
+                // apply_movement_damping,
             )
                 .chain(),
         );
@@ -33,10 +33,7 @@ pub struct Grounded;
 pub struct CharacterController;
 
 #[derive(Component)]
-pub struct MovementAcceleration(Scalar);
-
-#[derive(Component)]
-pub struct MovementDampingFactor(Scalar);
+pub struct MovementSpeed(Scalar);
 
 #[derive(Component)]
 pub struct JumpImpulse(Scalar);
@@ -48,22 +45,15 @@ pub struct MaxSlopeAngle(Scalar);
 
 #[derive(Bundle)]
 pub struct MovementBundle {
-    acceleration: MovementAcceleration,
-    damping: MovementDampingFactor,
+    acceleration: MovementSpeed,
     jump_impulse: JumpImpulse,
     max_slope_angle: MaxSlopeAngle,
 }
 
 impl MovementBundle {
-    pub const fn new(
-        acceleration: Scalar,
-        damping: Scalar,
-        jump_impulse: Scalar,
-        max_slope_angle: Scalar,
-    ) -> Self {
+    pub const fn new(speed: Scalar, jump_impulse: Scalar, max_slope_angle: Scalar) -> Self {
         Self {
-            acceleration: MovementAcceleration(acceleration),
-            damping: MovementDampingFactor(damping),
+            acceleration: MovementSpeed(speed),
             jump_impulse: JumpImpulse(jump_impulse),
             max_slope_angle: MaxSlopeAngle(max_slope_angle),
         }
@@ -72,7 +62,7 @@ impl MovementBundle {
 
 impl Default for MovementBundle {
     fn default() -> Self {
-        Self::new(4000.0, 0.80, 400.0, (30.0 as Scalar).to_radians())
+        Self::new(15000.0, 400.0, (30.0 as Scalar).to_radians())
     }
 }
 
@@ -111,12 +101,9 @@ fn keyboard_input(
     let right = keyboard_input.any_pressed([KeyCode::KeyD, KeyCode::ArrowRight]);
 
     let horizontal = right as i8 - left as i8;
+    movement_event_writer.send(MovementAction::Move(horizontal as Scalar));
 
-    if horizontal != 0 {
-        movement_event_writer.send(MovementAction::Move(horizontal as Scalar));
-    }
-
-    if keyboard_input.just_pressed(KeyCode::Space) {
+    if keyboard_input.any_pressed([KeyCode::Space, KeyCode::ArrowUp]) {
         movement_event_writer.send(MovementAction::Jump);
     }
 }
@@ -149,33 +136,24 @@ fn movement(
     time: Res<Time>,
     mut movement_event_reader: EventReader<MovementAction>,
     mut controllers: Query<(
-        &MovementAcceleration,
+        &MovementSpeed,
         &JumpImpulse,
         &mut LinearVelocity,
         Has<Grounded>,
     )>,
 ) {
     for event in movement_event_reader.read() {
-        for (movement_acceleration, jump_impulse, mut linear_velocity, is_grounded) in
-            &mut controllers
-        {
+        for (speed, jump_impulse, mut velocity, is_grounded) in &mut controllers {
             match event {
                 MovementAction::Move(direction) => {
-                    linear_velocity.x +=
-                        *direction * movement_acceleration.0 * time.delta_seconds();
+                    velocity.x = *direction * speed.0 * time.delta_seconds()
                 }
                 MovementAction::Jump => {
                     if is_grounded {
-                        linear_velocity.y = jump_impulse.0;
+                        velocity.y = jump_impulse.0;
                     }
                 }
             }
         }
-    }
-}
-
-fn apply_movement_damping(mut query: Query<(&MovementDampingFactor, &mut LinearVelocity)>) {
-    for (damping_factor, mut linear_velocity) in &mut query {
-        linear_velocity.x *= damping_factor.0;
     }
 }

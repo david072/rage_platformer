@@ -43,31 +43,17 @@ fn setup(mut commands: Commands) {
         ColliderDensity(2.),
     ));
 
-    // commands.spawn((
-    //     SpriteBundle {
-    //         sprite: Sprite {
-    //             color: Color::srgb(1., 1., 1.),
-    //             custom_size: Some(Vec2::new(100., 4.)),
-    //             ..default()
-    //         },
-    //         transform: Transform::from_xyz(0., 0., 0.),
-    //         ..default()
-    //     },
-    //     RigidBody::Static,
-    //     Collider::rectangle(100., 4.),
-    // ));
-
     commands.spawn((
         SpriteBundle {
             sprite: Sprite {
-                color: Color::srgb(0.7, 0.7, 0.8),
-                custom_size: Some(Vec2::new(1100.0, 50.0)),
+                color: Color::srgb(1., 1., 1.),
+                custom_size: Some(Vec2::new(1000., 4.)),
                 ..default()
             },
-            transform: Transform::from_xyz(0.0, -175.0, 0.0),
+            transform: Transform::from_xyz(0., 0., 0.),
             ..default()
         },
         RigidBody::Static,
-        Collider::rectangle(1100.0, 50.0),
+        Collider::rectangle(1000., 4.),
     ));
 }
