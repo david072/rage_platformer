@@ -10,6 +10,7 @@ mod character_controller;
 mod level0;
 
 const PLATFORM_SPEED: f32 = 0.5;
+const BOTTOM_WORLD_BOUNDARY: f32 = -500.;
 
 #[derive(Default, Resource)]
 struct SpikeData {
@@ -138,7 +139,6 @@ fn setup_level(
                     custom_size: Some(Vec2::new(200., 4.)),
                     ..default()
                 },
-                transform: Transform::from_xyz(1050., -30., 0.),
                 ..default()
             },
             MovingPlatformType::Slider(Vec3::new(550., -30., 0.), Vec3::new(750., 0., 0.)),
@@ -173,27 +173,23 @@ fn camera_smooth_follow_player(
 }
 
 fn death_condition(
-    mut collision_event_reader: EventReader<Collision>,
-    player: Query<Entity, With<Player>>,
-    spikes: Query<Entity, With<Spike>>,
+    player: Query<(Entity, &Transform), With<Player>>,
+    spikes: Query<&CollidingEntities, With<Spike>>,
     mut death_event_writer: EventWriter<DeathEvent>,
 ) {
-    let player = player.single();
-    for Collision(contacts) in collision_event_reader.read() {
-        let other_entity = if contacts.entity1 == player {
-            contacts.entity2
-        } else if contacts.entity2 == player {
-            contacts.entity1
-        } else {
-            continue;
-        };
+    let (player, player_transform) = player.single();
 
-        if !spikes.contains(other_entity) {
+    for colliding_entities in &spikes {
+        if !colliding_entities.contains(&player) {
             continue;
         }
 
         death_event_writer.send(DeathEvent);
         return;
+    }
+
+    if player_transform.translation.y <= BOTTOM_WORLD_BOUNDARY {
+        death_event_writer.send(DeathEvent);
     }
 }
 
