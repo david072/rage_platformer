@@ -1,7 +1,7 @@
 use avian2d::prelude::*;
 use bevy::prelude::*;
 
-fn platform(mut commands: Commands, pos: (f32, f32), size: (f32, f32)) {
+fn platform(commands: &mut ChildBuilder, pos: (f32, f32), size: (f32, f32)) {
     commands.spawn((
         SpriteBundle {
             sprite: Sprite {
@@ -9,7 +9,7 @@ fn platform(mut commands: Commands, pos: (f32, f32), size: (f32, f32)) {
                 custom_size: Some(Vec2::new(size.0, size.1)),
                 ..default()
             },
-            transform: Transform::from_xyz(pos.0, pos.1, 0.),
+            transform: Transform::from_xyz(pos.0, pos.1, 10.),
             ..default()
         },
         RigidBody::Static,
@@ -17,6 +17,6 @@ fn platform(mut commands: Commands, pos: (f32, f32), size: (f32, f32)) {
     ));
 }
 
-pub fn setup(commands: Commands) {
+pub fn setup(commands: &mut ChildBuilder) {
     platform(commands, (0., 0.), (1000., 4.));
 }
