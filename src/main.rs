@@ -1,49 +1,13 @@
 use avian2d::{math::Vector, prelude::*};
-use bevy::{
-    color::palettes::css::WHITE,
-    prelude::*,
-    sprite::{MaterialMesh2dBundle, Mesh2dHandle},
-};
+use bevy::prelude::*;
 use character_controller::{CharacterControllerBundle, CharacterControllerPlugin};
-mod character_controller;
+use levels::{LevelGenerator, MovingPlatform, MovingPlatformType, Spike, SpikeData};
 
-mod level0;
+mod character_controller;
+mod levels;
 
 const PLATFORM_SPEED: f32 = 0.5;
 const BOTTOM_WORLD_BOUNDARY: f32 = -500.;
-
-#[derive(Default, Resource)]
-struct SpikeData {
-    mesh: Option<Handle<Mesh>>,
-    material: Option<Handle<ColorMaterial>>,
-}
-
-impl SpikeData {
-    fn ensure_initialized(
-        &mut self,
-        mut meshes: ResMut<Assets<Mesh>>,
-        mut materials: ResMut<Assets<ColorMaterial>>,
-    ) {
-        if self.mesh.is_none() {
-            self.mesh = Some(meshes.add(Triangle2d::new(
-                Vec2::Y * 24.,
-                Vec2::new(-12., 0.),
-                Vec2::new(12., 0.),
-            )));
-        }
-        if self.material.is_none() {
-            self.material = Some(materials.add(Color::srgb(1., 0., 0.)));
-        }
-    }
-
-    fn mesh(&self) -> Option<Handle<Mesh>> {
-        self.mesh.as_ref().map(Handle::clone_weak)
-    }
-
-    fn material(&self) -> Option<Handle<ColorMaterial>> {
-        self.material.as_ref().map(Handle::clone_weak)
-    }
-}
 
 #[derive(Event)]
 struct DeathEvent;
@@ -53,20 +17,6 @@ struct LevelRoot;
 
 #[derive(Component)]
 struct Player;
-
-#[derive(Component)]
-struct Spike;
-
-#[derive(Component)]
-enum MovingPlatformType {
-    Slider(Vec3, Vec3),
-}
-
-#[derive(Default, Component)]
-struct MovingPlatform {
-    t: f32,
-    moving_backward: bool,
-}
 
 fn main() {
     App::new()
@@ -79,7 +29,7 @@ fn main() {
         .add_event::<DeathEvent>()
         .insert_resource(Gravity(Vector::NEG_Y * 1000.))
         .insert_resource(SpikeData::default())
-        .add_systems(Startup, (setup, setup_level).chain())
+        .add_systems(Startup, (setup, setup_level))
         .add_systems(
             Update,
             (
@@ -113,52 +63,21 @@ fn setup(mut commands: Commands) {
 }
 
 fn setup_level(
+    // The EntityCommands that we get from Commands::spawn() reborrows the Commands, which means
+    // we cannot borrow it again when passing it to setup_level. Therefore, we just ask Bevy to
+    // give us another 'static Commands lol...
     mut commands: Commands,
+    commands2: Commands,
     meshes: ResMut<Assets<Mesh>>,
     materials: ResMut<Assets<ColorMaterial>>,
-    mut spike_data: ResMut<SpikeData>,
+    spike_data: ResMut<SpikeData>,
 ) {
-    spike_data.ensure_initialized(meshes, materials);
-
-    fn spawn_entities(parent: &mut ChildBuilder, spike_data: &SpikeData) {
-        parent.spawn((
-            MaterialMesh2dBundle {
-                mesh: Mesh2dHandle(spike_data.mesh().unwrap()),
-                material: spike_data.material().unwrap(),
-                transform: Transform::from_xyz(100., 0., 5.),
-                ..default()
-            },
-            Spike,
-            Collider::rectangle(24., 24.),
-        ));
-
-        parent.spawn((
-            SpriteBundle {
-                sprite: Sprite {
-                    color: WHITE.into(),
-                    custom_size: Some(Vec2::new(200., 4.)),
-                    ..default()
-                },
-                ..default()
-            },
-            MovingPlatformType::Slider(Vec3::new(550., -30., 0.), Vec3::new(750., 0., 0.)),
-            MovingPlatform::default(),
-            ShapeCaster::new(Collider::rectangle(200., 4.), Vector::ZERO, 0., Dir2::Y)
-                .with_max_time_of_impact(1.),
-            RigidBody::Kinematic,
-            Collider::rectangle(200., 4.),
-        ));
-
-        level0::setup(parent);
-    }
-
-    commands
-        .spawn((
-            LevelRoot,
-            TransformBundle::from_transform(Transform::from_xyz(0., -30., 0.)),
-            VisibilityBundle::default(),
-        ))
-        .with_children(|commands| spawn_entities(commands, &*spike_data));
+    let level_root = commands.spawn((
+        LevelRoot,
+        TransformBundle::default(),
+        VisibilityBundle::default(),
+    ));
+    LevelGenerator::setup_level(commands2, level_root, meshes, materials, spike_data, 0);
 }
 
 fn camera_smooth_follow_player(
@@ -174,16 +93,17 @@ fn camera_smooth_follow_player(
 
 fn death_condition(
     player: Query<(Entity, &Transform), With<Player>>,
-    spikes: Query<&CollidingEntities, With<Spike>>,
+    mut spikes: Query<(&CollidingEntities, &mut Visibility), With<Spike>>,
     mut death_event_writer: EventWriter<DeathEvent>,
 ) {
     let (player, player_transform) = player.single();
 
-    for colliding_entities in &spikes {
+    for (colliding_entities, mut visibility) in &mut spikes {
         if !colliding_entities.contains(&player) {
             continue;
         }
 
+        *visibility = Visibility::default();
         death_event_writer.send(DeathEvent);
         return;
     }
@@ -198,6 +118,8 @@ fn reset_level(
     mut death_event_reader: EventReader<DeathEvent>,
     level_root: Query<Entity, With<LevelRoot>>,
     mut player: Query<&mut Transform, With<Player>>,
+    // for setup_level
+    commands2: Commands,
     meshes: ResMut<Assets<Mesh>>,
     materials: ResMut<Assets<ColorMaterial>>,
     spike_data: ResMut<SpikeData>,
@@ -212,7 +134,7 @@ fn reset_level(
     let mut player = player.single_mut();
     player.translation = Vec3::ZERO;
 
-    setup_level(commands, meshes, materials, spike_data);
+    setup_level(commands, commands2, meshes, materials, spike_data);
 }
 
 fn moving_platform_system(
