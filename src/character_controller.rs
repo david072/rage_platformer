@@ -29,8 +29,10 @@ pub enum MovementAction {
 #[component(storage = "SparseSet")]
 pub struct Grounded;
 
-#[derive(Component)]
-pub struct CharacterController;
+#[derive(Default, Component)]
+pub struct CharacterController {
+    prev_additional_x_vel: Scalar,
+}
 
 #[derive(Component)]
 pub struct MovementSpeed(Scalar);
@@ -82,11 +84,11 @@ impl CharacterControllerBundle {
         caster_shape.set_scale(Vector::ONE * 0.99, 10);
 
         Self {
-            character_controller: CharacterController,
+            character_controller: CharacterController::default(),
             rigid_body: RigidBody::Dynamic,
             collider,
             ground_caster: ShapeCaster::new(caster_shape, Vector::ZERO, 0., Dir2::NEG_Y)
-                .with_max_time_of_impact(10.0),
+                .with_max_time_of_impact(1.),
             locked_axes: LockedAxes::ROTATION_LOCKED,
             movement: MovementBundle::default(),
         }
@@ -136,6 +138,7 @@ fn movement(
     time: Res<Time>,
     mut movement_event_reader: EventReader<MovementAction>,
     mut controllers: Query<(
+        &mut CharacterController,
         &MovementSpeed,
         &JumpImpulse,
         &mut LinearVelocity,
@@ -143,10 +146,12 @@ fn movement(
     )>,
 ) {
     for event in movement_event_reader.read() {
-        for (speed, jump_impulse, mut velocity, is_grounded) in &mut controllers {
+        for (mut controller, speed, jump_impulse, mut velocity, is_grounded) in &mut controllers {
             match event {
                 MovementAction::Move(direction) => {
-                    velocity.x = *direction * speed.0 * time.delta_seconds()
+                    let additional_x_vel = *direction * speed.0 * time.delta_seconds();
+                    velocity.x += additional_x_vel - controller.prev_additional_x_vel;
+                    controller.prev_additional_x_vel = additional_x_vel;
                 }
                 MovementAction::Jump => {
                     if is_grounded {

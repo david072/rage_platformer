@@ -1,12 +1,15 @@
 use avian2d::{math::Vector, prelude::*};
 use bevy::{
+    color::palettes::css::WHITE,
     prelude::*,
     sprite::{MaterialMesh2dBundle, Mesh2dHandle},
 };
 use character_controller::{CharacterControllerBundle, CharacterControllerPlugin};
-
 mod character_controller;
+
 mod level0;
+
+const PLATFORM_SPEED: f32 = 0.5;
 
 #[derive(Default, Resource)]
 struct SpikeData {
@@ -53,6 +56,17 @@ struct Player;
 #[derive(Component)]
 struct Spike;
 
+#[derive(Component)]
+enum MovingPlatformType {
+    Slider(Vec3, Vec3),
+}
+
+#[derive(Default, Component)]
+struct MovingPlatform {
+    t: f32,
+    moving_backward: bool,
+}
+
 fn main() {
     App::new()
         .add_plugins((
@@ -69,7 +83,8 @@ fn main() {
             Update,
             (
                 camera_smooth_follow_player,
-                (rotate_spikes, death_condition, reset_level).chain(),
+                moving_platform_system,
+                (death_condition, reset_level).chain(),
             ),
         )
         .run();
@@ -92,6 +107,7 @@ fn setup(mut commands: Commands) {
         Friction::ZERO.with_combine_rule(CoefficientCombine::Min),
         Restitution::ZERO.with_combine_rule(CoefficientCombine::Min),
         ColliderDensity(2.),
+        ExternalForce::new(Vector::ZERO).with_persistence(false),
     ));
 }
 
@@ -115,6 +131,24 @@ fn setup_level(
             Collider::rectangle(24., 24.),
         ));
 
+        parent.spawn((
+            SpriteBundle {
+                sprite: Sprite {
+                    color: WHITE.into(),
+                    custom_size: Some(Vec2::new(200., 4.)),
+                    ..default()
+                },
+                transform: Transform::from_xyz(1050., -30., 0.),
+                ..default()
+            },
+            MovingPlatformType::Slider(Vec3::new(550., -30., 0.), Vec3::new(750., 0., 0.)),
+            MovingPlatform::default(),
+            ShapeCaster::new(Collider::rectangle(200., 4.), Vector::ZERO, 0., Dir2::Y)
+                .with_max_time_of_impact(1.),
+            RigidBody::Kinematic,
+            Collider::rectangle(200., 4.),
+        ));
+
         level0::setup(parent);
     }
 
@@ -125,12 +159,6 @@ fn setup_level(
             VisibilityBundle::default(),
         ))
         .with_children(|commands| spawn_entities(commands, &*spike_data));
-}
-
-fn rotate_spikes(mut spikes: Query<&mut Transform, With<Spike>>) {
-    for mut spike in &mut spikes {
-        spike.rotate_z(0.1);
-    }
 }
 
 fn camera_smooth_follow_player(
@@ -189,4 +217,50 @@ fn reset_level(
     player.translation = Vec3::ZERO;
 
     setup_level(commands, meshes, materials, spike_data);
+}
+
+fn moving_platform_system(
+    time: Res<Time>,
+    mut platforms: Query<(
+        &mut Transform,
+        &MovingPlatformType,
+        &mut MovingPlatform,
+        &ShapeHits,
+    )>,
+    mut rigid_bodies: Query<(&RigidBody, &mut Transform), Without<MovingPlatform>>,
+) {
+    for (mut transform, ty, mut platform, top_hits) in &mut platforms {
+        let movement_sign = if platform.moving_backward { -1. } else { 1. };
+        platform.t += PLATFORM_SPEED * time.delta_seconds() * movement_sign;
+        platform.t = platform.t.clamp(0., 1.);
+
+        if platform.t >= 1.0 {
+            platform.moving_backward = true;
+        } else if platform.t <= 0.0 {
+            platform.moving_backward = false;
+        }
+
+        match ty {
+            MovingPlatformType::Slider(a, b) => {
+                transform.translation = a.lerp(*b, platform.t);
+
+                // units per second
+                // It takes the platform 1 / PLATFORM_SPEED to go from a to b, i.e. the distance of |a.x - b.x|. This means
+                // platform_speed = (a.x - b.x).abs() / (1. / PLATFORM_SPEED)
+                // Adding the movement sign and simplifying leads to the following:
+                let platform_speed = (a.x - b.x).abs() * PLATFORM_SPEED * movement_sign;
+
+                // FIXME: This moves the RigidBody into other colliders and it causes weird stuff :( pls fix
+                for ShapeHitData { entity, .. } in top_hits.iter() {
+                    let Ok((rb, mut transform)) = rigid_bodies.get_mut(*entity) else {
+                        continue;
+                    };
+                    if !matches!(rb, RigidBody::Dynamic) {
+                        continue;
+                    }
+                    transform.translation.x += platform_speed * time.delta_seconds();
+                }
+            }
+        }
+    }
 }
