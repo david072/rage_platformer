@@ -2,15 +2,18 @@ use avian2d::{math::Vector, prelude::*};
 use bevy::prelude::*;
 use character_controller::{CharacterControllerBundle, CharacterControllerPlugin};
 use levels::{LevelEnd, LevelGenerator, MovingPlatform, MovingPlatformType, Spike, SpikeData};
+use main_menu::MainMenuPlugin;
 
 mod character_controller;
 mod levels;
+mod main_menu;
 
 const PLATFORM_SPEED: f32 = 0.5;
 const BOTTOM_WORLD_BOUNDARY: f32 = -500.;
 
 #[derive(Debug, Clone, PartialEq, Eq, Hash, States)]
 enum GameState {
+    MainMenu,
     Level(u16),
 }
 
@@ -23,6 +26,7 @@ impl ComputedStates for InLevel {
     fn compute(sources: Self::SourceStates) -> Option<Self> {
         match sources {
             GameState::Level(_) => Some(Self),
+            _ => None,
         }
     }
 }
@@ -50,27 +54,37 @@ fn main() {
             PhysicsPlugins::default().with_length_unit(20.),
         ))
         .add_plugins(CharacterControllerPlugin)
+        .add_plugins(MainMenuPlugin)
         .add_event::<LevelRestartEvent>()
         .add_event::<DeathEvent>()
         .insert_resource(Gravity(Vector::NEG_Y * 1000.))
         .insert_resource(SpikeData::default())
         .add_computed_state::<InLevel>()
-        .insert_state(GameState::Level(0))
-        .add_systems(OnEnter(InLevel), setup)
+        .insert_state(GameState::MainMenu)
+        .add_systems(Startup, setup)
+        .add_systems(OnEnter(InLevel), setup_level)
         .add_systems(
             Update,
             (
-                (setup_level, level_complete_condition, death_condition).chain(),
+                (
+                    setup_level_content,
+                    level_complete_condition,
+                    death_condition,
+                )
+                    .chain(),
                 camera_smooth_follow_player,
                 moving_platform_system,
-            ),
+            )
+                .run_if(in_state(InLevel)),
         )
         .run();
 }
 
-fn setup(mut commands: Commands, mut level_changed_writer: EventWriter<LevelRestartEvent>) {
+fn setup(mut commands: Commands) {
     commands.spawn(Camera2dBundle::default());
+}
 
+fn setup_level(mut commands: Commands, mut level_changed_writer: EventWriter<LevelRestartEvent>) {
     commands.spawn((
         SpriteBundle {
             sprite: Sprite {
@@ -91,7 +105,7 @@ fn setup(mut commands: Commands, mut level_changed_writer: EventWriter<LevelRest
     level_changed_writer.send(LevelRestartEvent::FullReset);
 }
 
-fn setup_level(
+fn setup_level_content(
     mut level_restart_reader: EventReader<LevelRestartEvent>,
     level_root: Query<Entity, With<LevelRoot>>,
     spikes: Query<Entity, With<Spike>>,
@@ -125,7 +139,9 @@ fn setup_level(
     }
 
     // spawn level entities
-    let GameState::Level(idx) = **game_state;
+    let GameState::Level(idx) = **game_state else {
+        return;
+    };
 
     let level_root = commands.spawn((
         LevelRoot,
@@ -161,7 +177,9 @@ fn level_complete_condition(
                 continue;
             }
 
-            let GameState::Level(idx) = **game_state;
+            let GameState::Level(idx) = **game_state else {
+                return;
+            };
             next_state.set(GameState::Level(idx + 1));
             level_restart_writer.send(LevelRestartEvent::FullReset);
             commands.entity(end_entity).remove::<Collider>();
