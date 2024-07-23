@@ -14,6 +14,19 @@ enum GameState {
     Level(u16),
 }
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+struct InLevel;
+
+impl ComputedStates for InLevel {
+    type SourceStates = GameState;
+
+    fn compute(sources: Self::SourceStates) -> Option<Self> {
+        match sources {
+            GameState::Level(_) => Some(Self),
+        }
+    }
+}
+
 #[derive(Event)]
 enum LevelRestartEvent {
     KeepSpikes,
@@ -41,8 +54,9 @@ fn main() {
         .add_event::<DeathEvent>()
         .insert_resource(Gravity(Vector::NEG_Y * 1000.))
         .insert_resource(SpikeData::default())
+        .add_computed_state::<InLevel>()
         .insert_state(GameState::Level(0))
-        .add_systems(Startup, setup)
+        .add_systems(OnEnter(InLevel), setup)
         .add_systems(
             Update,
             (
