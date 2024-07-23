@@ -2,19 +2,28 @@ use avian2d::{math::Vector, prelude::*};
 use bevy::prelude::*;
 use character_controller::{CharacterControllerBundle, CharacterControllerPlugin};
 use levels::{LevelEnd, LevelGenerator, MovingPlatform, MovingPlatformType, Spike, SpikeData};
-use main_menu::MainMenuPlugin;
+use ui::{main_menu::MainMenuPlugin, pause_menu::PauseMenuPlugin};
 
 mod character_controller;
 mod levels;
-mod main_menu;
+mod ui;
 
 const PLATFORM_SPEED: f32 = 0.5;
 const BOTTOM_WORLD_BOUNDARY: f32 = -500.;
 
 #[derive(Debug, Clone, PartialEq, Eq, Hash, States)]
-enum GameState {
+pub enum GameState {
     MainMenu,
-    Level(u16),
+    Level { index: u16, paused: bool },
+}
+
+impl GameState {
+    pub fn level(index: u16) -> Self {
+        Self::Level {
+            index,
+            paused: false,
+        }
+    }
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
@@ -25,7 +34,25 @@ impl ComputedStates for InLevel {
 
     fn compute(sources: Self::SourceStates) -> Option<Self> {
         match sources {
-            GameState::Level(_) => Some(Self),
+            GameState::Level { .. } => Some(Self),
+            _ => None,
+        }
+    }
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+pub enum IsPaused {
+    Paused,
+    Unpaused,
+}
+
+impl ComputedStates for IsPaused {
+    type SourceStates = GameState;
+
+    fn compute(sources: Self::SourceStates) -> Option<Self> {
+        match sources {
+            GameState::Level { paused: true, .. } => Some(Self::Paused),
+            GameState::Level { paused: false, .. } => Some(Self::Unpaused),
             _ => None,
         }
     }
@@ -55,14 +82,19 @@ fn main() {
         ))
         .add_plugins(CharacterControllerPlugin)
         .add_plugins(MainMenuPlugin)
+        .add_plugins(PauseMenuPlugin)
         .add_event::<LevelRestartEvent>()
         .add_event::<DeathEvent>()
         .insert_resource(Gravity(Vector::NEG_Y * 1000.))
         .insert_resource(SpikeData::default())
         .add_computed_state::<InLevel>()
+        .add_computed_state::<IsPaused>()
         .insert_state(GameState::MainMenu)
         .add_systems(Startup, setup)
         .add_systems(OnEnter(InLevel), setup_level)
+        .add_systems(OnEnter(IsPaused::Paused), begin_pause)
+        .add_systems(OnExit(IsPaused::Paused), end_pause)
+        .add_systems(OnExit(InLevel), (cleanup_level, cleanup_level_content))
         .add_systems(
             Update,
             (
@@ -75,8 +107,9 @@ fn main() {
                 camera_smooth_follow_player,
                 moving_platform_system,
             )
-                .run_if(in_state(InLevel)),
+                .run_if(in_state(IsPaused::Unpaused)),
         )
+        .add_systems(Update, pause_system.run_if(in_state(InLevel)))
         .run();
 }
 
@@ -103,6 +136,13 @@ fn setup_level(mut commands: Commands, mut level_changed_writer: EventWriter<Lev
     ));
 
     level_changed_writer.send(LevelRestartEvent::FullReset);
+}
+
+fn cleanup_level(mut commands: Commands, player: Query<Entity, With<Player>>) {
+    let Ok(player) = player.get_single() else {
+        return;
+    };
+    commands.entity(player).despawn_recursive();
 }
 
 fn setup_level_content(
@@ -139,7 +179,7 @@ fn setup_level_content(
     }
 
     // spawn level entities
-    let GameState::Level(idx) = **game_state else {
+    let GameState::Level { index, .. } = **game_state else {
         return;
     };
 
@@ -148,14 +188,22 @@ fn setup_level_content(
         TransformBundle::default(),
         VisibilityBundle::default(),
     ));
-    LevelGenerator::setup_level(commands2, level_root, meshes, materials, spike_data, idx);
+    LevelGenerator::setup_level(commands2, level_root, meshes, materials, spike_data, index);
+}
+
+fn cleanup_level_content(mut commands: Commands, level_root: Query<Entity, With<LevelRoot>>) {
+    if let Ok(level_root) = level_root.get_single() {
+        commands.entity(level_root).despawn_recursive();
+    }
 }
 
 fn camera_smooth_follow_player(
     mut cameras: Query<&mut Transform, With<Camera2d>>,
     player: Query<&Transform, (With<Player>, Without<Camera2d>)>,
 ) {
-    let player = player.single();
+    let Ok(player) = player.get_single() else {
+        return;
+    };
 
     for mut camera in &mut cameras {
         camera.translation = camera.translation.lerp(player.translation, 0.1);
@@ -170,17 +218,19 @@ fn level_complete_condition(
     mut next_state: ResMut<NextState<GameState>>,
     mut level_restart_writer: EventWriter<LevelRestartEvent>,
 ) {
-    let player = player.single();
+    let Ok(player) = player.get_single() else {
+        return;
+    };
     for (end_entity, end_colliding_entities) in &level_end {
         for entity in end_colliding_entities.iter() {
             if *entity != player {
                 continue;
             }
 
-            let GameState::Level(idx) = **game_state else {
+            let GameState::Level { index, .. } = **game_state else {
                 return;
             };
-            next_state.set(GameState::Level(idx + 1));
+            next_state.set(GameState::level(index + 1));
             level_restart_writer.send(LevelRestartEvent::FullReset);
             commands.entity(end_entity).remove::<Collider>();
             return;
@@ -194,7 +244,9 @@ fn death_condition(
     mut death_event_writer: EventWriter<DeathEvent>,
     mut level_restart_writer: EventWriter<LevelRestartEvent>,
 ) {
-    let (player, player_transform) = player.single();
+    let Ok((player, player_transform)) = player.get_single() else {
+        return;
+    };
 
     for (colliding_entities, mut visibility) in &mut spikes {
         if !colliding_entities.contains(&player) {
@@ -257,4 +309,31 @@ fn moving_platform_system(
             }
         }
     }
+}
+
+fn pause_system(
+    keyboard_input: Res<ButtonInput<KeyCode>>,
+    game_state: Res<State<GameState>>,
+    mut next_state: ResMut<NextState<GameState>>,
+) {
+    if !keyboard_input.just_pressed(KeyCode::Escape) {
+        return;
+    }
+
+    let GameState::Level { index, paused } = **game_state else {
+        return;
+    };
+    let now_paused = !paused;
+    next_state.set(GameState::Level {
+        index,
+        paused: now_paused,
+    });
+}
+
+fn begin_pause(mut physics_time: ResMut<Time<Physics>>) {
+    physics_time.pause();
+}
+
+fn end_pause(mut physics_time: ResMut<Time<Physics>>) {
+    physics_time.unpause();
 }

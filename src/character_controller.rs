@@ -2,6 +2,8 @@ use avian2d::math::{Scalar, Vector};
 use avian2d::prelude::*;
 use bevy::prelude::*;
 
+use crate::IsPaused;
+
 pub struct CharacterControllerPlugin;
 
 impl Plugin for CharacterControllerPlugin {
@@ -13,7 +15,8 @@ impl Plugin for CharacterControllerPlugin {
                 movement,
                 // apply_movement_damping,
             )
-                .chain(),
+                .chain()
+                .run_if(in_state(IsPaused::Unpaused)),
         );
     }
 }
