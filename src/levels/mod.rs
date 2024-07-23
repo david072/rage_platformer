@@ -180,6 +180,10 @@ impl<'a> LevelGenerator<'a> {
         }
     }
 
+    pub fn level_count() -> u16 {
+        2
+    }
+
     fn platform(&mut self, pos: (f32, f32), size: f32) {
         let id = self.commands.spawn(PlatformBundle::new(pos, size)).id();
         self.level_commands.add_child(id);

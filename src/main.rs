@@ -14,6 +14,7 @@ const BOTTOM_WORLD_BOUNDARY: f32 = -500.;
 #[derive(Debug, Clone, PartialEq, Eq, Hash, States)]
 pub enum GameState {
     MainMenu,
+    LevelSelect,
     Level { index: u16, paused: bool },
 }
 

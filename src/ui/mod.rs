@@ -9,6 +9,8 @@ const NORMAL_BUTTON: Srgba = BLACK;
 const HOVERED_BUTTON: Srgba = DARK_SLATE_GREY;
 const PRESSED_BUTTON: Srgba = GREY;
 
+type ButtonInteractionResult = Option<Entity>;
+
 fn spawn_root_node<'a>(commands: &'a mut Commands) -> EntityCommands<'a> {
     commands.spawn(NodeBundle {
         style: Style {
@@ -62,24 +64,23 @@ fn spawn_sized_box(parent: &mut ChildBuilder, width: Val, height: Val) {
 fn button_interaction<C: Component>(
     mouse_input: Res<ButtonInput<MouseButton>>,
     mut interaction_query: Query<
-        (&Interaction, &mut BackgroundColor),
+        (Entity, &Interaction, &mut BackgroundColor),
         (Changed<Interaction>, With<C>),
     >,
-) -> bool {
-    let mut result = false;
-    for (interaction, mut bg) in &mut interaction_query {
+) -> ButtonInteractionResult {
+    for (entity, interaction, mut bg) in &mut interaction_query {
         match interaction {
             Interaction::None => *bg = NORMAL_BUTTON.into(),
             Interaction::Hovered => {
                 *bg = HOVERED_BUTTON.into();
 
                 if mouse_input.just_released(MouseButton::Left) {
-                    result = true;
+                    return Some(entity);
                 }
             }
             Interaction::Pressed => *bg = PRESSED_BUTTON.into(),
         }
     }
 
-    return result;
+    None
 }

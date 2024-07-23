@@ -61,11 +61,11 @@ fn cleanup_pause_menu(mut commands: Commands, entities: Query<Entity, With<Pause
 }
 
 fn resume_button_system(
-    In(released): In<bool>,
+    In(released): In<ButtonInteractionResult>,
     game_state: Res<State<GameState>>,
     mut next_game_state: ResMut<NextState<GameState>>,
 ) {
-    if !released {
+    if released.is_none() {
         return;
     }
 
@@ -79,10 +79,10 @@ fn resume_button_system(
 }
 
 fn exit_to_main_menu_button_system(
-    In(released): In<bool>,
+    In(released): In<ButtonInteractionResult>,
     mut next_game_state: ResMut<NextState<GameState>>,
 ) {
-    if !released {
+    if released.is_none() {
         return;
     }
 
