@@ -1,13 +1,24 @@
 use avian2d::{math::Vector, prelude::*};
 use bevy::prelude::*;
 use character_controller::{CharacterControllerBundle, CharacterControllerPlugin};
-use levels::{LevelGenerator, MovingPlatform, MovingPlatformType, Spike, SpikeData};
+use levels::{LevelEnd, LevelGenerator, MovingPlatform, MovingPlatformType, Spike, SpikeData};
 
 mod character_controller;
 mod levels;
 
 const PLATFORM_SPEED: f32 = 0.5;
 const BOTTOM_WORLD_BOUNDARY: f32 = -500.;
+
+#[derive(Debug, Clone, PartialEq, Eq, Hash, States)]
+enum GameState {
+    Level(u16),
+}
+
+#[derive(Event)]
+enum LevelRestartEvent {
+    KeepSpikes,
+    FullReset,
+}
 
 #[derive(Event)]
 struct DeathEvent;
@@ -26,22 +37,24 @@ fn main() {
             PhysicsPlugins::default().with_length_unit(20.),
         ))
         .add_plugins(CharacterControllerPlugin)
+        .add_event::<LevelRestartEvent>()
         .add_event::<DeathEvent>()
         .insert_resource(Gravity(Vector::NEG_Y * 1000.))
         .insert_resource(SpikeData::default())
-        .add_systems(Startup, (setup, setup_level))
+        .insert_state(GameState::Level(0))
+        .add_systems(Startup, setup)
         .add_systems(
             Update,
             (
+                (setup_level, level_complete_condition, death_condition).chain(),
                 camera_smooth_follow_player,
                 moving_platform_system,
-                (death_condition, reset_level).chain(),
             ),
         )
         .run();
 }
 
-fn setup(mut commands: Commands) {
+fn setup(mut commands: Commands, mut level_changed_writer: EventWriter<LevelRestartEvent>) {
     commands.spawn(Camera2dBundle::default());
 
     commands.spawn((
@@ -60,9 +73,15 @@ fn setup(mut commands: Commands) {
         ColliderDensity(2.),
         ExternalForce::new(Vector::ZERO).with_persistence(false),
     ));
+
+    level_changed_writer.send(LevelRestartEvent::FullReset);
 }
 
 fn setup_level(
+    mut level_restart_reader: EventReader<LevelRestartEvent>,
+    level_root: Query<Entity, With<LevelRoot>>,
+    spikes: Query<Entity, With<Spike>>,
+    mut player: Query<&mut Transform, With<Player>>,
     // The EntityCommands that we get from Commands::spawn() reborrows the Commands, which means
     // we cannot borrow it again when passing it to setup_level. Therefore, we just ask Bevy to
     // give us another 'static Commands lol...
@@ -71,13 +90,35 @@ fn setup_level(
     meshes: ResMut<Assets<Mesh>>,
     materials: ResMut<Assets<ColorMaterial>>,
     spike_data: ResMut<SpikeData>,
+    game_state: Res<State<GameState>>,
 ) {
+    // reset level
+    let Some(level_restart_event) = level_restart_reader.read().next() else {
+        return;
+    };
+
+    if let Ok(level_root) = level_root.get_single() {
+        commands.entity(level_root).despawn_recursive();
+
+        let mut player = player.single_mut();
+        player.translation = Vec3::ZERO;
+    }
+
+    if matches!(level_restart_event, LevelRestartEvent::FullReset) {
+        for spike in &spikes {
+            commands.entity(spike).despawn_recursive();
+        }
+    }
+
+    // spawn level entities
+    let GameState::Level(idx) = **game_state;
+
     let level_root = commands.spawn((
         LevelRoot,
         TransformBundle::default(),
         VisibilityBundle::default(),
     ));
-    LevelGenerator::setup_level(commands2, level_root, meshes, materials, spike_data, 0);
+    LevelGenerator::setup_level(commands2, level_root, meshes, materials, spike_data, idx);
 }
 
 fn camera_smooth_follow_player(
@@ -91,10 +132,35 @@ fn camera_smooth_follow_player(
     }
 }
 
+fn level_complete_condition(
+    mut commands: Commands,
+    player: Query<Entity, With<Player>>,
+    level_end: Query<(Entity, &CollidingEntities), With<LevelEnd>>,
+    game_state: Res<State<GameState>>,
+    mut next_state: ResMut<NextState<GameState>>,
+    mut level_restart_writer: EventWriter<LevelRestartEvent>,
+) {
+    let player = player.single();
+    for (end_entity, end_colliding_entities) in &level_end {
+        for entity in end_colliding_entities.iter() {
+            if *entity != player {
+                continue;
+            }
+
+            let GameState::Level(idx) = **game_state;
+            next_state.set(GameState::Level(idx + 1));
+            level_restart_writer.send(LevelRestartEvent::FullReset);
+            commands.entity(end_entity).remove::<Collider>();
+            return;
+        }
+    }
+}
+
 fn death_condition(
     player: Query<(Entity, &Transform), With<Player>>,
     mut spikes: Query<(&CollidingEntities, &mut Visibility), With<Spike>>,
     mut death_event_writer: EventWriter<DeathEvent>,
+    mut level_restart_writer: EventWriter<LevelRestartEvent>,
 ) {
     let (player, player_transform) = player.single();
 
@@ -105,36 +171,14 @@ fn death_condition(
 
         *visibility = Visibility::default();
         death_event_writer.send(DeathEvent);
+        level_restart_writer.send(LevelRestartEvent::KeepSpikes);
         return;
     }
 
     if player_transform.translation.y <= BOTTOM_WORLD_BOUNDARY {
         death_event_writer.send(DeathEvent);
+        level_restart_writer.send(LevelRestartEvent::KeepSpikes);
     }
-}
-
-fn reset_level(
-    mut commands: Commands,
-    mut death_event_reader: EventReader<DeathEvent>,
-    level_root: Query<Entity, With<LevelRoot>>,
-    mut player: Query<&mut Transform, With<Player>>,
-    // for setup_level
-    commands2: Commands,
-    meshes: ResMut<Assets<Mesh>>,
-    materials: ResMut<Assets<ColorMaterial>>,
-    spike_data: ResMut<SpikeData>,
-) {
-    if death_event_reader.read().count() == 0 {
-        return;
-    }
-
-    let level_root = level_root.single();
-    commands.entity(level_root).despawn_recursive();
-
-    let mut player = player.single_mut();
-    player.translation = Vec3::ZERO;
-
-    setup_level(commands, commands2, meshes, materials, spike_data);
 }
 
 fn moving_platform_system(
