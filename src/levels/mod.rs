@@ -13,7 +13,7 @@ mod level1;
 const PLATFORM_Z: f32 = 10.;
 const SPIKE_Z: f32 = 5.;
 const DOOR_Z: f32 = -1.;
-const SPIKE_SIZE: (f32, f32) = (24., 24.);
+const SPIKE_SIZE: Vec2 = Vec2::new(24., 24.);
 const PLATFORM_THICKNESS: f32 = 4.;
 const DOOR_SIZE: Vec2 = Vec2::new(30., 50.);
 
@@ -30,6 +30,7 @@ pub enum MovingPlatformType {
 
 #[derive(Default, Component)]
 pub struct MovingPlatform {
+    pub active: bool,
     pub t: f32,
     pub moving_backward: bool,
 }
@@ -51,7 +52,7 @@ impl PlatformBundle {
                     custom_size: Some(size),
                     ..default()
                 },
-                transform: Transform::from_xyz(pos.0, pos.1, PLATFORM_Z),
+                transform: Transform::from_xyz(pos.0 + size.x / 2., pos.1, PLATFORM_Z),
                 ..default()
             },
             collider: Collider::rectangle(size.x, size.y),
@@ -88,6 +89,7 @@ impl MovingPlatformBundle {
                 0.,
                 Dir2::Y,
             )
+            .with_ignore_origin_penetration(true)
             .with_max_time_of_impact(1.),
         }
     }
@@ -195,8 +197,8 @@ impl<'a> LevelGenerator<'a> {
             .spawn((
                 PlatformBundle::new(a, size).with_rigid_body(RigidBody::Kinematic),
                 MovingPlatformBundle::slider(
-                    Vec3::new(a.0, a.1, PLATFORM_Z),
-                    Vec3::new(b.0, b.1, PLATFORM_Z),
+                    Vec3::new(a.0 + size / 2., a.1, PLATFORM_Z),
+                    Vec3::new(b.0 + size / 2., b.1, PLATFORM_Z),
                     size,
                 ),
             ))
@@ -214,7 +216,7 @@ impl<'a> LevelGenerator<'a> {
                 ..default()
             },
             Spike,
-            Collider::rectangle(SPIKE_SIZE.0, SPIKE_SIZE.1),
+            Collider::rectangle(SPIKE_SIZE.x, SPIKE_SIZE.y),
         ));
     }
 
@@ -228,7 +230,7 @@ impl<'a> LevelGenerator<'a> {
                         custom_size: Some(DOOR_SIZE),
                         ..default()
                     },
-                    transform: Transform::from_xyz(pos.0, pos.1, DOOR_Z),
+                    transform: Transform::from_xyz(pos.0, pos.1 + DOOR_SIZE.y / 2., DOOR_Z),
                     ..default()
                 },
                 LevelEnd,

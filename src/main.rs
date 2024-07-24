@@ -167,7 +167,7 @@ fn setup_level(
             ..default()
         },
         Player,
-        CharacterControllerBundle::new(Collider::rectangle(20., 40.)),
+        CharacterControllerBundle::new(Collider::capsule(10., 20.)),
         Friction::ZERO.with_combine_rule(CoefficientCombine::Min),
         Restitution::ZERO.with_combine_rule(CoefficientCombine::Min),
         ColliderDensity(2.),
@@ -409,14 +409,20 @@ fn moving_platform_system(
     mut rigid_bodies: Query<(&RigidBody, &mut Transform), Without<MovingPlatform>>,
 ) {
     for (mut transform, ty, mut platform, top_hits) in &mut platforms {
-        let movement_sign = if platform.moving_backward { -1. } else { 1. };
-        platform.t += PLATFORM_SPEED * time.delta_seconds() * movement_sign;
-        platform.t = platform.t.clamp(0., 1.);
+        if !top_hits.is_empty() {
+            platform.active = true;
+        }
 
-        if platform.t >= 1.0 {
-            platform.moving_backward = true;
-        } else if platform.t <= 0.0 {
-            platform.moving_backward = false;
+        let movement_sign = if platform.moving_backward { -1. } else { 1. };
+        if platform.active {
+            platform.t += PLATFORM_SPEED * time.delta_seconds() * movement_sign;
+            platform.t = platform.t.clamp(0., 1.);
+
+            if platform.t >= 1.0 {
+                platform.moving_backward = true;
+            } else if platform.t <= 0.0 {
+                platform.moving_backward = false;
+            }
         }
 
         match ty {
