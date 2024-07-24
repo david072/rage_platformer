@@ -11,7 +11,7 @@ const PRESSED_BUTTON: Srgba = GREY;
 
 type ButtonInteractionResult = Option<Entity>;
 
-fn spawn_root_node<'a>(commands: &'a mut Commands) -> EntityCommands<'a> {
+pub fn spawn_root_node<'a>(commands: &'a mut Commands) -> EntityCommands<'a> {
     commands.spawn(NodeBundle {
         style: Style {
             width: Val::Percent(100.),
@@ -25,7 +25,10 @@ fn spawn_root_node<'a>(commands: &'a mut Commands) -> EntityCommands<'a> {
     })
 }
 
-fn spawn_button<'a>(parent: &'a mut ChildBuilder, text: impl Into<String>) -> EntityCommands<'a> {
+pub fn spawn_button<'a>(
+    parent: &'a mut ChildBuilder,
+    text: impl Into<String>,
+) -> EntityCommands<'a> {
     let mut cmds = parent.spawn(ButtonBundle {
         style: Style {
             width: BUTTON_WIDTH,
@@ -50,7 +53,7 @@ fn spawn_button<'a>(parent: &'a mut ChildBuilder, text: impl Into<String>) -> En
     cmds
 }
 
-fn spawn_sized_box(parent: &mut ChildBuilder, width: Val, height: Val) {
+pub fn spawn_sized_box(parent: &mut ChildBuilder, width: Val, height: Val) {
     parent.spawn(NodeBundle {
         style: Style {
             width,
@@ -61,7 +64,7 @@ fn spawn_sized_box(parent: &mut ChildBuilder, width: Val, height: Val) {
     });
 }
 
-fn button_interaction<C: Component>(
+pub fn button_interaction<C: Component>(
     mouse_input: Res<ButtonInput<MouseButton>>,
     mut interaction_query: Query<
         (Entity, &Interaction, &mut BackgroundColor),

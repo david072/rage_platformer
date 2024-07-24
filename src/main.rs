@@ -1,5 +1,5 @@
 use avian2d::{math::Vector, prelude::*};
-use bevy::prelude::*;
+use bevy::{color::palettes::css::*, ecs::system::EntityCommands, prelude::*, time::Stopwatch};
 use character_controller::{CharacterControllerBundle, CharacterControllerPlugin};
 use levels::{LevelEnd, LevelGenerator, MovingPlatform, MovingPlatformType, Spike, SpikeData};
 use ui::{main_menu::MainMenuPlugin, pause_menu::PauseMenuPlugin};
@@ -60,10 +60,22 @@ impl ComputedStates for IsPaused {
 }
 
 #[derive(Event)]
+struct LevelCompleteEvent;
+
+#[derive(Event)]
 enum LevelRestartEvent {
     KeepSpikes,
-    FullReset,
+    /// Performs a full reset and spawns the given level index.
+    /// We need to add the level id since the state changes aren't committed in the same frame,
+    /// meaning setup_level_content doesn't get the correct index directly.
+    FullReset(u16),
 }
+
+#[derive(Default, Resource)]
+struct LevelStopwatch(Stopwatch);
+
+#[derive(Default, Resource)]
+struct DeathCounter(usize);
 
 #[derive(Event)]
 struct DeathEvent;
@@ -73,6 +85,18 @@ struct LevelRoot;
 
 #[derive(Component)]
 struct Player;
+
+#[derive(Component)]
+struct Hud;
+
+#[derive(Component)]
+struct LevelText;
+
+#[derive(Component)]
+struct TimeText;
+
+#[derive(Component)]
+struct DeathsText;
 
 fn main() {
     App::new()
@@ -84,13 +108,16 @@ fn main() {
         .add_plugins(CharacterControllerPlugin)
         .add_plugins(MainMenuPlugin)
         .add_plugins(PauseMenuPlugin)
+        .add_event::<LevelCompleteEvent>()
         .add_event::<LevelRestartEvent>()
         .add_event::<DeathEvent>()
         .insert_resource(Gravity(Vector::NEG_Y * 1000.))
         .insert_resource(SpikeData::default())
+        .insert_resource(DeathCounter::default())
+        .init_resource::<LevelStopwatch>()
         .add_computed_state::<InLevel>()
         .add_computed_state::<IsPaused>()
-        .insert_state(GameState::MainMenu)
+        .insert_state(GameState::level(0))
         .add_systems(Startup, setup)
         .add_systems(OnEnter(InLevel), setup_level)
         .add_systems(OnEnter(IsPaused::Paused), begin_pause)
@@ -99,15 +126,22 @@ fn main() {
         .add_systems(
             Update,
             (
-                (
-                    setup_level_content,
-                    level_complete_condition,
-                    death_condition,
-                )
-                    .chain(),
                 camera_smooth_follow_player,
                 moving_platform_system,
+                (
+                    level_complete_condition,
+                    on_level_completed,
+                    death_condition,
+                    setup_level_content,
+                )
+                    .chain(),
             )
+                .run_if(in_state(IsPaused::Unpaused)),
+        )
+        .add_systems(
+            PostUpdate,
+            (update_death_counter, update_hud)
+                .chain()
                 .run_if(in_state(IsPaused::Unpaused)),
         )
         .add_systems(Update, pause_system.run_if(in_state(InLevel)))
@@ -118,7 +152,11 @@ fn setup(mut commands: Commands) {
     commands.spawn(Camera2dBundle::default());
 }
 
-fn setup_level(mut commands: Commands, mut level_changed_writer: EventWriter<LevelRestartEvent>) {
+fn setup_level(
+    mut commands: Commands,
+    game_state: Res<State<GameState>>,
+    mut level_changed_writer: EventWriter<LevelRestartEvent>,
+) {
     commands.spawn((
         SpriteBundle {
             sprite: Sprite {
@@ -136,14 +174,76 @@ fn setup_level(mut commands: Commands, mut level_changed_writer: EventWriter<Lev
         ExternalForce::new(Vector::ZERO).with_persistence(false),
     ));
 
-    level_changed_writer.send(LevelRestartEvent::FullReset);
+    commands
+        .spawn((
+            NodeBundle {
+                style: Style {
+                    margin: UiRect::all(Val::Px(20.)),
+                    width: Val::Percent(100.),
+                    height: Val::Percent(100.),
+                    flex_direction: FlexDirection::Column,
+                    ..default()
+                },
+                ..default()
+            },
+            Hud,
+        ))
+        .with_children(|parent| {
+            fn text<'a>(
+                parent: &'a mut ChildBuilder,
+                text: impl Into<String>,
+                font_size: f32,
+            ) -> EntityCommands<'a> {
+                parent.spawn(TextBundle::from_section(
+                    text,
+                    TextStyle {
+                        font_size,
+                        color: WHITE.into(),
+                        ..default()
+                    },
+                ))
+            }
+
+            text(parent, "Level 1", 50.).insert(LevelText);
+
+            parent.spawn(NodeBundle {
+                style: Style {
+                    margin: UiRect::vertical(Val::Px(10.)),
+                    width: Val::Px(100.),
+                    height: Val::Px(4.),
+                    ..default()
+                },
+                background_color: LIGHT_SLATE_GRAY.into(),
+                ..default()
+            });
+
+            text(parent, "Time: 12.1s", 25.).insert(TimeText);
+            text(parent, "Deaths: 0", 25.).insert(DeathsText);
+        });
+
+    commands.insert_resource(LevelStopwatch::default());
+
+    let GameState::Level { index, .. } = **game_state else {
+        return;
+    };
+    level_changed_writer.send(LevelRestartEvent::FullReset(index));
 }
 
-fn cleanup_level(mut commands: Commands, player: Query<Entity, With<Player>>) {
+fn cleanup_level(
+    mut commands: Commands,
+    player: Query<Entity, With<Player>>,
+    hud: Query<Entity, With<Hud>>,
+) {
     let Ok(player) = player.get_single() else {
         return;
     };
     commands.entity(player).despawn_recursive();
+
+    for entity in &hud {
+        commands.entity(entity).despawn_recursive();
+    }
+
+    commands.remove_resource::<LevelStopwatch>();
 }
 
 fn setup_level_content(
@@ -168,19 +268,27 @@ fn setup_level_content(
 
     if let Ok(level_root) = level_root.get_single() {
         commands.entity(level_root).despawn_recursive();
-
-        let mut player = player.single_mut();
-        player.translation = Vec3::ZERO;
     }
 
-    if matches!(level_restart_event, LevelRestartEvent::FullReset) {
+    let mut player = player.single_mut();
+    player.translation = Vec3::ZERO;
+
+    let mut level_idx: Option<u16> = None;
+    if let LevelRestartEvent::FullReset(idx) = level_restart_event {
+        level_idx = Some(*idx);
         for spike in &spikes {
             commands.entity(spike).despawn_recursive();
         }
     }
 
     // spawn level entities
-    let GameState::Level { index, .. } = **game_state else {
+    let Some(level_idx) = level_idx.or_else(|| {
+        if let GameState::Level { index, .. } = **game_state {
+            Some(index)
+        } else {
+            None
+        }
+    }) else {
         return;
     };
 
@@ -189,7 +297,9 @@ fn setup_level_content(
         TransformBundle::default(),
         VisibilityBundle::default(),
     ));
-    LevelGenerator::setup_level(commands2, level_root, meshes, materials, spike_data, index);
+    LevelGenerator::setup_level(
+        commands2, level_root, meshes, materials, spike_data, level_idx,
+    );
 }
 
 fn cleanup_level_content(mut commands: Commands, level_root: Query<Entity, With<LevelRoot>>) {
@@ -212,31 +322,44 @@ fn camera_smooth_follow_player(
 }
 
 fn level_complete_condition(
-    mut commands: Commands,
     player: Query<Entity, With<Player>>,
-    level_end: Query<(Entity, &CollidingEntities), With<LevelEnd>>,
-    game_state: Res<State<GameState>>,
-    mut next_state: ResMut<NextState<GameState>>,
-    mut level_restart_writer: EventWriter<LevelRestartEvent>,
+    level_end: Query<&CollidingEntities, With<LevelEnd>>,
+    mut level_complete_writer: EventWriter<LevelCompleteEvent>,
 ) {
     let Ok(player) = player.get_single() else {
         return;
     };
-    for (end_entity, end_colliding_entities) in &level_end {
+    for end_colliding_entities in &level_end {
         for entity in end_colliding_entities.iter() {
             if *entity != player {
                 continue;
             }
 
-            let GameState::Level { index, .. } = **game_state else {
-                return;
-            };
-            next_state.set(GameState::level(index + 1));
-            level_restart_writer.send(LevelRestartEvent::FullReset);
-            commands.entity(end_entity).remove::<Collider>();
+            level_complete_writer.send(LevelCompleteEvent);
             return;
         }
     }
+}
+
+fn on_level_completed(
+    mut level_stopwatch: ResMut<LevelStopwatch>,
+    mut death_counter: ResMut<DeathCounter>,
+    mut level_complete_reader: EventReader<LevelCompleteEvent>,
+    game_state: Res<State<GameState>>,
+    mut next_state: ResMut<NextState<GameState>>,
+    mut level_restart_writer: EventWriter<LevelRestartEvent>,
+) {
+    if level_complete_reader.read().count() == 0 {
+        return;
+    }
+
+    let GameState::Level { index, .. } = **game_state else {
+        return;
+    };
+    next_state.set(GameState::level(index + 1));
+    level_restart_writer.send(LevelRestartEvent::FullReset(index + 1));
+    level_stopwatch.0.reset();
+    death_counter.0 = 0;
 }
 
 fn death_condition(
@@ -263,6 +386,15 @@ fn death_condition(
     if player_transform.translation.y <= BOTTOM_WORLD_BOUNDARY {
         death_event_writer.send(DeathEvent);
         level_restart_writer.send(LevelRestartEvent::KeepSpikes);
+    }
+}
+
+fn update_death_counter(
+    mut death_counter: ResMut<DeathCounter>,
+    mut death_event_reader: EventReader<DeathEvent>,
+) {
+    for _ in death_event_reader.read() {
+        death_counter.0 += 1;
     }
 }
 
@@ -337,4 +469,33 @@ fn begin_pause(mut physics_time: ResMut<Time<Physics>>) {
 
 fn end_pause(mut physics_time: ResMut<Time<Physics>>) {
     physics_time.unpause();
+}
+
+fn update_hud(
+    time: Res<Time<Physics>>,
+    mut level_stopwatch: ResMut<LevelStopwatch>,
+    game_state: Res<State<GameState>>,
+    deaths: Res<DeathCounter>,
+    mut texts: Query<(&mut Text, Has<LevelText>, Has<TimeText>, Has<DeathsText>)>,
+) {
+    let GameState::Level {
+        index: level_idx, ..
+    } = **game_state
+    else {
+        return;
+    };
+
+    level_stopwatch.0.tick(time.delta());
+
+    for (mut text, is_level_text, is_time_text, is_deaths_text) in &mut texts {
+        text.sections[0].value = if is_level_text {
+            format!("Level {}", level_idx + 1)
+        } else if is_time_text {
+            format!("Time: {:.1}s", level_stopwatch.0.elapsed_secs())
+        } else if is_deaths_text {
+            format!("Deaths: {}", deaths.0)
+        } else {
+            continue;
+        };
+    }
 }
