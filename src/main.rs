@@ -1,5 +1,8 @@
 use avian2d::{math::Vector, prelude::*};
-use bevy::{color::palettes::css::*, ecs::system::EntityCommands, prelude::*, time::Stopwatch};
+use bevy::{
+    color::palettes::css::*, ecs::system::EntityCommands, math::NormedVectorSpace, prelude::*,
+    time::Stopwatch,
+};
 use character_controller::{CharacterControllerBundle, CharacterControllerPlugin};
 use levels::{LevelEnd, LevelGenerator, MovingPlatform, MovingPlatformType, Spike, SpikeData};
 use ui::{main_menu::MainMenuPlugin, pause_menu::PauseMenuPlugin};
@@ -413,27 +416,23 @@ fn moving_platform_system(
             platform.active = true;
         }
 
-        let movement_sign = if platform.moving_backward { -1. } else { 1. };
-        if platform.active {
-            platform.t += PLATFORM_SPEED * time.delta_seconds() * movement_sign;
-            platform.t = platform.t.clamp(0., 1.);
-
-            if platform.t >= 1.0 {
-                platform.moving_backward = true;
-            } else if platform.t <= 0.0 {
-                platform.moving_backward = false;
-            }
+        if !platform.active {
+            continue;
         }
 
-        match ty {
-            MovingPlatformType::Slider(a, b) => {
-                transform.translation = a.lerp(*b, platform.t);
+        let movement_sign = if platform.moving_backward { -1. } else { 1. };
 
-                // units per second
-                // It takes the platform 1 / PLATFORM_SPEED to go from a to b, i.e. the distance of |a.x - b.x|. This means
-                // platform_speed = (a.x - b.x).abs() / (1. / PLATFORM_SPEED)
-                // Adding the movement sign and simplifying leads to the following:
-                let platform_speed = (a.x - b.x).abs() * PLATFORM_SPEED * movement_sign;
+        match ty {
+            MovingPlatformType::Slider {
+                a,
+                b,
+                speed,
+                delta_t_per_second,
+            } => {
+                platform.t += delta_t_per_second * time.delta_seconds() * movement_sign;
+                platform.t = platform.t.clamp(0., 1.);
+
+                transform.translation = a.lerp(*b, platform.t);
 
                 // FIXME: This moves the RigidBody into other colliders and it causes weird stuff :( pls fix
                 for ShapeHitData { entity, .. } in top_hits.iter() {
@@ -443,9 +442,15 @@ fn moving_platform_system(
                     if !matches!(rb, RigidBody::Dynamic) {
                         continue;
                     }
-                    transform.translation.x += platform_speed * time.delta_seconds();
+                    transform.translation.x += speed * time.delta_seconds() * movement_sign;
                 }
             }
+        }
+
+        if platform.t >= 1.0 {
+            platform.moving_backward = true;
+        } else if platform.t <= 0.0 {
+            platform.moving_backward = false;
         }
     }
 }
