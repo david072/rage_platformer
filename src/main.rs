@@ -1,5 +1,6 @@
 use avian2d::{math::Vector, prelude::*};
 use bevy::{
+    audio::{PlaybackMode, Volume},
     color::palettes::css::*,
     ecs::system::EntityCommands,
     prelude::*,
@@ -12,13 +13,18 @@ use levels::{
     LevelEnd, LevelGenerator, MovingPlatform, MovingPlatformType, PersistentAnchor,
     PersistentColliderConstructor, Spike, SpikeData,
 };
-use ui::{main_menu::MainMenuPlugin, pause_menu::PauseMenuPlugin};
+use ui::{main_menu::MainMenuPlugin, pause_menu::PauseMenuPlugin, UiPlugin};
 
 mod character_controller;
 mod levels;
 mod ui;
 
+const PLAYER_SIZE: Vec2 = Vec2::new(20., 40.);
 const BOTTOM_WORLD_BOUNDARY: f32 = -500.;
+const BACKGROUND_AUDIO: &str = "background.ogg";
+const CHECKPOINT_ACTIVATE_SOUND_EFFECT: &str = "checkpoint_activate.ogg";
+const DEATH_SOUND_EFFECT: &str = "player_death.ogg";
+const LEVEL_COMPLETE_SOUND_EFFECT: &str = "level_complete.ogg";
 
 #[derive(Debug, Clone, PartialEq, Eq, Hash, States)]
 pub enum GameState {
@@ -96,7 +102,7 @@ struct SaveData {
 struct DeathEvent;
 
 #[derive(Event)]
-struct SaveEvent {
+struct CheckpointSaveEvent {
     position: Vec2,
 }
 
@@ -121,6 +127,9 @@ struct TimeText;
 #[derive(Component)]
 struct DeathsText;
 
+#[derive(Component)]
+struct BackgroundAudio;
+
 fn main() {
     App::new()
         .register_type::<PersistentColliderConstructor>()
@@ -136,14 +145,15 @@ fn main() {
             DefaultPlugins,
             // 1 meter = 20 pixels
             PhysicsPlugins::default().with_length_unit(20.),
+            CharacterControllerPlugin,
+            UiPlugin,
+            MainMenuPlugin,
+            PauseMenuPlugin,
         ))
-        .add_plugins(CharacterControllerPlugin)
-        .add_plugins(MainMenuPlugin)
-        .add_plugins(PauseMenuPlugin)
         .add_event::<LevelCompleteEvent>()
         .add_event::<LevelRestartEvent>()
         .add_event::<DeathEvent>()
-        .add_event::<SaveEvent>()
+        .add_event::<CheckpointSaveEvent>()
         .add_event::<RemoveSaveEvent>()
         .insert_resource(Gravity(Vector::NEG_Y * 1000.))
         .insert_resource(SpikeData::default())
@@ -152,7 +162,7 @@ fn main() {
         .init_resource::<LevelStopwatch>()
         .add_computed_state::<InLevel>()
         .add_computed_state::<IsPaused>()
-        .insert_state(GameState::level(1))
+        .insert_state(GameState::MainMenu)
         .add_systems(Startup, setup)
         .add_systems(OnEnter(InLevel), setup_level)
         .add_systems(OnEnter(IsPaused::Paused), begin_pause)
@@ -185,6 +195,8 @@ fn main() {
         .add_systems(
             PostUpdate,
             (
+                play_checkpoint_activate_sound_effect,
+                play_death_sound_effect,
                 (update_death_counter, update_hud).chain(),
                 persistent_collider_constructor_system,
                 persistent_anchor_system,
@@ -201,6 +213,7 @@ fn setup(mut commands: Commands) {
 
 fn setup_level(
     mut commands: Commands,
+    asset_server: Res<AssetServer>,
     game_state: Res<State<GameState>>,
     mut level_changed_writer: EventWriter<LevelRestartEvent>,
 ) {
@@ -208,7 +221,7 @@ fn setup_level(
         SpriteBundle {
             sprite: Sprite {
                 color: Color::srgb(1., 0.7, 0.),
-                custom_size: Some(Vec2::new(20., 40.)),
+                custom_size: Some(PLAYER_SIZE),
                 ..default()
             },
             ..default()
@@ -270,6 +283,14 @@ fn setup_level(
 
     commands.insert_resource(LevelStopwatch::default());
 
+    commands.spawn((
+        AudioBundle {
+            source: asset_server.load(BACKGROUND_AUDIO),
+            settings: PlaybackSettings::LOOP.with_volume(Volume::new(0.2)),
+        },
+        BackgroundAudio,
+    ));
+
     let GameState::Level { index, .. } = **game_state else {
         return;
     };
@@ -280,13 +301,14 @@ fn cleanup_level(
     mut commands: Commands,
     player: Query<Entity, With<Player>>,
     hud: Query<Entity, With<Hud>>,
+    background_audio: Query<Entity, With<BackgroundAudio>>,
 ) {
     let Ok(player) = player.get_single() else {
         return;
     };
     commands.entity(player).despawn_recursive();
 
-    for entity in &hud {
+    for entity in hud.iter().chain(background_audio.iter()) {
         commands.entity(entity).despawn_recursive();
     }
 
@@ -309,7 +331,7 @@ fn setup_level_content(
     level_root: Query<Entity, With<LevelRoot>>,
     spikes: Query<Entity, With<Spike>>,
     checkpoints: Query<Entity, With<Checkpoint>>,
-    mut player: Query<&mut Transform, With<Player>>,
+    mut player: Query<(&mut Transform, Option<&mut LinearVelocity>), With<Player>>,
     // The EntityCommands that we get from Commands::spawn() reborrows the Commands, which means
     // we cannot borrow it again when passing it to setup_level. Therefore, we just ask Bevy to
     // give us another 'static Commands lol...
@@ -332,7 +354,10 @@ fn setup_level_content(
         commands.entity(level_root).despawn_recursive();
     }
 
-    let mut player = player.single_mut();
+    let (mut player_transform, player_velocity) = player.single_mut();
+    if let Some(mut vel) = player_velocity {
+        vel.0 = Vector::ZERO;
+    }
 
     match level_restart_event {
         LevelRestartEvent::RestoreLastSave => {
@@ -343,10 +368,10 @@ fn setup_level_content(
             ));
 
             if let Some(save_data) = save_data {
-                player.translation = save_data.position.extend(0.) + Vec3::new(0., 100., 0.);
+                player_transform.translation = save_data.position.extend(0.);
                 scene_spawner.spawn_dynamic_as_child(save_data.scene.clone_weak(), level_root.id());
             } else {
-                player.translation = Vec3::ZERO;
+                player_transform.translation = Vec3::ZERO;
                 let GameState::Level { index, .. } = **game_state else {
                     return;
                 };
@@ -363,7 +388,7 @@ fn setup_level_content(
             }
         }
         LevelRestartEvent::FullReset(index) => {
-            player.translation = Vec3::ZERO;
+            player_transform.translation = Vec3::ZERO;
             for entity in spikes.iter().chain(checkpoints.iter()) {
                 commands.entity(entity).despawn_recursive();
             }
@@ -386,9 +411,18 @@ fn setup_level_content(
     }
 }
 
-fn cleanup_level_content(mut commands: Commands, level_root: Query<Entity, With<LevelRoot>>) {
+fn cleanup_level_content(
+    mut commands: Commands,
+    level_root: Query<Entity, With<LevelRoot>>,
+    spikes: Query<Entity, With<Spike>>,
+    checkpoints: Query<Entity, With<Checkpoint>>,
+) {
     if let Ok(level_root) = level_root.get_single() {
         commands.entity(level_root).despawn_recursive();
+    }
+
+    for entity in spikes.iter().chain(checkpoints.iter()) {
+        commands.entity(entity).despawn_recursive();
     }
 }
 
@@ -432,9 +466,10 @@ fn on_level_completed(
     game_state: Res<State<GameState>>,
     mut next_state: ResMut<NextState<GameState>>,
     mut level_restart_writer: EventWriter<LevelRestartEvent>,
-    commands: Commands,
+    mut commands: Commands,
     save_data: Option<Res<SaveData>>,
     dynamic_scenes: ResMut<Assets<DynamicScene>>,
+    asset_server: Res<AssetServer>,
 ) {
     if level_complete_reader.read().count() == 0 {
         return;
@@ -447,6 +482,12 @@ fn on_level_completed(
     level_restart_writer.send(LevelRestartEvent::FullReset(index + 1));
     level_stopwatch.0.reset();
     death_counter.0 = 0;
+
+    commands.spawn(AudioBundle {
+        source: asset_server.load(LEVEL_COMPLETE_SOUND_EFFECT),
+        settings: PlaybackSettings::DESPAWN.with_volume(Volume::new(0.5)),
+    });
+
     remove_save(commands, save_data, dynamic_scenes);
 }
 
@@ -483,6 +524,23 @@ fn update_death_counter(
 ) {
     for _ in death_event_reader.read() {
         death_counter.0 += 1;
+    }
+}
+
+fn play_death_sound_effect(
+    mut commands: Commands,
+    mut death_event_reader: EventReader<DeathEvent>,
+    asset_server: Res<AssetServer>,
+) {
+    for _ in death_event_reader.read() {
+        commands.spawn(AudioBundle {
+            source: asset_server.load(DEATH_SOUND_EFFECT),
+            settings: PlaybackSettings {
+                mode: PlaybackMode::Despawn,
+                volume: Volume::new(0.3),
+                ..default()
+            },
+        });
     }
 }
 
@@ -550,7 +608,7 @@ fn checkpoint_system(
         &mut Handle<ColorMaterial>,
     )>,
     checkpoint_data: ResMut<CheckpointData>,
-    mut save_event_writer: EventWriter<SaveEvent>,
+    mut save_event_writer: EventWriter<CheckpointSaveEvent>,
 ) {
     let Ok(player) = player.get_single() else {
         return;
@@ -570,8 +628,8 @@ fn checkpoint_system(
         if colliding_entities.iter().any(|e| *e == player) {
             active_checkpoint = Some(entity);
             if !is_active {
-                save_event_writer.send(SaveEvent {
-                    position: transform.translation.truncate(),
+                save_event_writer.send(CheckpointSaveEvent {
+                    position: (transform.translation).truncate() + Vec2::new(0., PLAYER_SIZE.y),
                 });
             }
         }
@@ -584,12 +642,29 @@ fn checkpoint_system(
     }
 }
 
+fn play_checkpoint_activate_sound_effect(
+    mut commands: Commands,
+    asset_server: Res<AssetServer>,
+    mut save_event_reader: EventReader<CheckpointSaveEvent>,
+) {
+    for _ in save_event_reader.read() {
+        commands.spawn(AudioBundle {
+            source: asset_server.load(CHECKPOINT_ACTIVATE_SOUND_EFFECT),
+            settings: PlaybackSettings {
+                mode: PlaybackMode::Despawn,
+                volume: Volume::new(0.3),
+                ..default()
+            },
+        });
+    }
+}
+
 fn create_save(
-    mut save_event_reader: EventReader<SaveEvent>,
+    mut save_event_reader: EventReader<CheckpointSaveEvent>,
     level_root: Query<&Children, With<LevelRoot>>,
     world: &World,
 ) -> Option<(Vec2, DynamicScene)> {
-    let Some(SaveEvent { position }) = save_event_reader.read().next() else {
+    let Some(CheckpointSaveEvent { position }) = save_event_reader.read().next() else {
         return None;
     };
     let Ok(level_root_children) = level_root.get_single() else {
@@ -654,12 +729,24 @@ fn pause_system(
     });
 }
 
-fn begin_pause(mut physics_time: ResMut<Time<Physics>>) {
+fn begin_pause(
+    mut physics_time: ResMut<Time<Physics>>,
+    mut background_audio: Query<&mut AudioSink, With<BackgroundAudio>>,
+) {
     physics_time.pause();
+    for sink in &mut background_audio {
+        sink.pause();
+    }
 }
 
-fn end_pause(mut physics_time: ResMut<Time<Physics>>) {
+fn end_pause(
+    mut physics_time: ResMut<Time<Physics>>,
+    mut background_audio: Query<&mut AudioSink, With<BackgroundAudio>>,
+) {
     physics_time.unpause();
+    for sink in &mut background_audio {
+        sink.play();
+    }
 }
 
 fn update_hud(
