@@ -1,9 +1,9 @@
-use avian2d::{math::Vector, prelude::*};
+use avian2d::prelude::*;
 use bevy::{
     color::palettes::css::*,
     ecs::system::EntityCommands,
     prelude::*,
-    sprite::{MaterialMesh2dBundle, Mesh2dHandle},
+    sprite::{Anchor, MaterialMesh2dBundle, Mesh2dHandle},
 };
 use level0::Level0;
 use level1::Level1;
@@ -19,13 +19,75 @@ const SPIKE_SIZE: Vec2 = Vec2::new(24., 24.);
 const PLATFORM_THICKNESS: f32 = 4.;
 const DOOR_SIZE: Vec2 = Vec2::new(30., 50.);
 
-#[derive(Component)]
+#[derive(Reflect, Component)]
+#[reflect(Component)]
 pub struct LevelEnd;
 
 #[derive(Component)]
 pub struct Spike;
 
-#[derive(Component)]
+#[derive(Default, Component)]
+pub struct Checkpoint {
+    pub active: bool,
+}
+
+#[derive(Clone, Debug, PartialEq, Reflect, Component)]
+#[reflect(Debug, Component, PartialEq)]
+pub struct PersistentColliderConstructor(ColliderConstructor);
+
+impl From<ColliderConstructor> for PersistentColliderConstructor {
+    fn from(value: ColliderConstructor) -> Self {
+        Self(value)
+    }
+}
+
+pub fn persistent_collider_constructor_system(
+    mut commands: Commands,
+    entities: Query<(
+        Entity,
+        &PersistentColliderConstructor,
+        Has<Collider>,
+        Has<ColliderConstructor>,
+    )>,
+) {
+    for (entity, persistent_collider_constructor, has_collider, has_collider_constructor) in
+        &entities
+    {
+        if has_collider || has_collider_constructor {
+            continue;
+        }
+
+        commands
+            .entity(entity)
+            .insert(persistent_collider_constructor.0.clone());
+    }
+}
+
+#[derive(Clone, Debug, PartialEq, Reflect, Component)]
+#[reflect(Debug, Component, PartialEq)]
+pub struct PersistentAnchor(Anchor);
+
+impl From<Anchor> for PersistentAnchor {
+    fn from(value: Anchor) -> Self {
+        Self(value)
+    }
+}
+
+pub fn persistent_anchor_system(
+    mut commands: Commands,
+    entities: Query<(Entity, &PersistentAnchor, Has<Anchor>)>,
+) {
+    for (entity, persistent_anchor, has_anchor) in &entities {
+        if has_anchor {
+            continue;
+        }
+
+        commands.entity(entity).insert(persistent_anchor.0.clone());
+    }
+}
+
+#[derive(Reflect, Component)]
+#[reflect(Component)]
 pub enum MovingPlatformType {
     Slider {
         a: Vec3,
@@ -47,7 +109,8 @@ impl MovingPlatformType {
     }
 }
 
-#[derive(Default, Component)]
+#[derive(Default, Component, Reflect)]
+#[reflect(Component)]
 pub struct MovingPlatform {
     pub active: bool,
     pub t: f32,
@@ -57,7 +120,7 @@ pub struct MovingPlatform {
 #[derive(Bundle)]
 struct PlatformBundle {
     sprite: SpriteBundle,
-    collider: Collider,
+    collider_constructor: PersistentColliderConstructor,
     rigid_body: RigidBody,
 }
 
@@ -74,7 +137,11 @@ impl PlatformBundle {
                 transform: Transform::from_xyz(pos.0 + size.x / 2., pos.1, PLATFORM_Z),
                 ..default()
             },
-            collider: Collider::rectangle(size.x, size.y),
+            collider_constructor: ColliderConstructor::Rectangle {
+                x_length: size.x,
+                y_length: size.y,
+            }
+            .into(),
             rigid_body: RigidBody::Static,
         }
     }
@@ -93,23 +160,13 @@ impl PlatformBundle {
 struct MovingPlatformBundle {
     ty: MovingPlatformType,
     platform: MovingPlatform,
-    shape_caster: ShapeCaster,
 }
 
 impl MovingPlatformBundle {
-    pub fn slider(a: Vec3, b: Vec3, size: f32, speed: f32) -> Self {
-        let size_vec = PlatformBundle::make_size_vector(size);
+    pub fn slider(a: Vec3, b: Vec3, speed: f32) -> Self {
         Self {
             ty: MovingPlatformType::slider(a, b, speed),
             platform: MovingPlatform::default(),
-            shape_caster: ShapeCaster::new(
-                Collider::rectangle(size_vec.x, size_vec.y),
-                Vector::ZERO,
-                0.,
-                Dir2::Y,
-            )
-            .with_ignore_origin_penetration(true)
-            .with_max_time_of_impact(1.),
         }
     }
 }
@@ -123,8 +180,8 @@ pub struct SpikeData {
 impl SpikeData {
     pub fn ensure_initialized(
         &mut self,
-        mut meshes: ResMut<Assets<Mesh>>,
-        mut materials: ResMut<Assets<ColorMaterial>>,
+        meshes: &mut ResMut<Assets<Mesh>>,
+        materials: &mut ResMut<Assets<ColorMaterial>>,
     ) {
         if self.mesh.is_none() {
             self.mesh = Some(meshes.add(Triangle2d::new(
@@ -144,6 +201,47 @@ impl SpikeData {
 
     pub fn material(&self) -> Option<Handle<ColorMaterial>> {
         self.material.as_ref().map(Handle::clone_weak)
+    }
+}
+
+#[derive(Default, Resource)]
+pub struct CheckpointData {
+    mesh: Option<Handle<Mesh>>,
+    material: Option<Handle<ColorMaterial>>,
+    active_material: Option<Handle<ColorMaterial>>,
+}
+
+impl CheckpointData {
+    pub fn ensure_initialized(
+        &mut self,
+        meshes: &mut ResMut<Assets<Mesh>>,
+        materials: &mut ResMut<Assets<ColorMaterial>>,
+    ) {
+        if self.mesh.is_none() {
+            self.mesh = Some(meshes.add(Triangle2d::new(
+                Vec2::new(-20., 40.),
+                Vec2::new(20., 40.),
+                Vec2::ZERO,
+            )));
+        }
+        if self.material.is_none() {
+            self.material = Some(materials.add(Color::from(GRAY)));
+        }
+        if self.active_material.is_none() {
+            self.active_material = Some(materials.add(Color::from(LIGHT_GREEN)));
+        }
+    }
+
+    pub fn mesh(&self) -> Option<Handle<Mesh>> {
+        self.mesh.as_ref().map(Handle::clone_weak)
+    }
+
+    pub fn default_material(&self) -> Option<Handle<ColorMaterial>> {
+        self.material.as_ref().map(Handle::clone_weak)
+    }
+
+    pub fn active_material(&self) -> Option<Handle<ColorMaterial>> {
+        self.active_material.as_ref().map(Handle::clone_weak)
     }
 }
 
@@ -167,34 +265,74 @@ pub struct LevelGenerator<'a> {
     commands: Commands<'a, 'a>,
     level_commands: EntityCommands<'a>,
     spike_data: ResMut<'a, SpikeData>,
+    checkpoint_data: ResMut<'a, CheckpointData>,
+    enable_permanent_entities: bool,
 }
 
 impl<'a> LevelGenerator<'a> {
     pub fn new(
         commands: Commands<'a, 'a>,
         level_commands: EntityCommands<'a>,
-        meshes: ResMut<Assets<Mesh>>,
-        materials: ResMut<Assets<ColorMaterial>>,
+        meshes: &mut ResMut<Assets<Mesh>>,
+        materials: &mut ResMut<Assets<ColorMaterial>>,
         mut spike_data: ResMut<'a, SpikeData>,
+        mut checkpoint_data: ResMut<'a, CheckpointData>,
     ) -> Self {
         spike_data.ensure_initialized(meshes, materials);
+        checkpoint_data.ensure_initialized(meshes, materials);
         Self {
             commands,
             level_commands,
             spike_data,
+            checkpoint_data,
+            enable_permanent_entities: true,
         }
     }
 
     pub fn setup_level(
         commands: Commands<'a, 'a>,
         level_commands: EntityCommands<'a>,
-        meshes: ResMut<Assets<Mesh>>,
-        materials: ResMut<Assets<ColorMaterial>>,
+        meshes: &mut ResMut<Assets<Mesh>>,
+        materials: &mut ResMut<Assets<ColorMaterial>>,
         spike_data: ResMut<'a, SpikeData>,
+        checkpoint_data: ResMut<'a, CheckpointData>,
         idx: u16,
     ) {
-        let mut lg = Self::new(commands, level_commands, meshes, materials, spike_data);
+        let mut lg = Self::new(
+            commands,
+            level_commands,
+            meshes,
+            materials,
+            spike_data,
+            checkpoint_data,
+        );
         lg.spawn_level_text(idx);
+        match idx {
+            0 => lg.level0(),
+            1 => lg.level1(),
+            _ => panic!("Invalid level index: {idx}"),
+        }
+    }
+
+    pub fn setup_level_without_permanent_entities(
+        commands: Commands<'a, 'a>,
+        level_commands: EntityCommands<'a>,
+        meshes: &mut ResMut<Assets<Mesh>>,
+        materials: &mut ResMut<Assets<ColorMaterial>>,
+        spike_data: ResMut<'a, SpikeData>,
+        checkpoint_data: ResMut<'a, CheckpointData>,
+        idx: u16,
+    ) {
+        let mut lg = Self::new(
+            commands,
+            level_commands,
+            meshes,
+            materials,
+            spike_data,
+            checkpoint_data,
+        );
+        lg.spawn_level_text(idx);
+        lg.set_enable_permanent_entities(false);
         match idx {
             0 => lg.level0(),
             1 => lg.level1(),
@@ -206,21 +344,27 @@ impl<'a> LevelGenerator<'a> {
         2
     }
 
+    fn set_enable_permanent_entities(&mut self, enable: bool) {
+        self.enable_permanent_entities = enable;
+    }
+
     fn spawn_level_text(&mut self, index: u16) {
+        let bundle = Text2dBundle {
+            text: Text::from_section(
+                format!("Level {}", index + 1),
+                TextStyle {
+                    color: GRAY.with_alpha(0.2).into(),
+                    font_size: 80.,
+                    ..default()
+                },
+            ),
+            transform: Transform::from_xyz(0., 0., LEVEL_TEXT_Z),
+            ..default()
+        };
+
         let id = self
             .commands
-            .spawn(Text2dBundle {
-                text: Text::from_section(
-                    format!("Level {}", index + 1),
-                    TextStyle {
-                        color: GRAY.with_alpha(0.2).into(),
-                        font_size: 80.,
-                        ..default()
-                    },
-                ),
-                transform: Transform::from_xyz(0., 0., LEVEL_TEXT_Z),
-                ..default()
-            })
+            .spawn((PersistentAnchor(bundle.text_anchor.clone()), bundle))
             .id();
         self.level_commands.add_child(id);
     }
@@ -239,7 +383,6 @@ impl<'a> LevelGenerator<'a> {
                 MovingPlatformBundle::slider(
                     Vec3::new(a.0 + size / 2., a.1, PLATFORM_Z),
                     Vec3::new(b.0 + size / 2., b.1, PLATFORM_Z),
-                    size,
                     speed,
                 ),
             ))
@@ -248,6 +391,9 @@ impl<'a> LevelGenerator<'a> {
     }
 
     fn spike(&mut self, pos: (f32, f32)) {
+        if !self.enable_permanent_entities {
+            return;
+        }
         self.commands.spawn((
             MaterialMesh2dBundle {
                 mesh: Mesh2dHandle(self.spike_data.mesh().unwrap()),
@@ -258,6 +404,22 @@ impl<'a> LevelGenerator<'a> {
             },
             Spike,
             Collider::rectangle(SPIKE_SIZE.x, SPIKE_SIZE.y),
+        ));
+    }
+
+    fn checkpoint(&mut self, pos: (f32, f32)) {
+        if !self.enable_permanent_entities {
+            return;
+        }
+        self.commands.spawn((
+            MaterialMesh2dBundle {
+                mesh: Mesh2dHandle(self.checkpoint_data.mesh().unwrap()),
+                material: self.checkpoint_data.default_material().unwrap(),
+                transform: Transform::from_xyz(pos.0, pos.1, -10.),
+                ..default()
+            },
+            Collider::triangle(Vec2::new(-20., 40.), Vec2::new(20., 40.), Vec2::ZERO),
+            Checkpoint::default(),
         ));
     }
 
@@ -275,7 +437,10 @@ impl<'a> LevelGenerator<'a> {
                     ..default()
                 },
                 LevelEnd,
-                Collider::rectangle(DOOR_SIZE.x, DOOR_SIZE.y),
+                PersistentColliderConstructor(ColliderConstructor::Rectangle {
+                    x_length: DOOR_SIZE.x,
+                    y_length: DOOR_SIZE.y,
+                }),
             ))
             .id();
         self.level_commands.add_child(id);

@@ -1,17 +1,23 @@
 use avian2d::{math::Vector, prelude::*};
 use bevy::{
-    color::palettes::css::*, ecs::system::EntityCommands, math::NormedVectorSpace, prelude::*,
+    color::palettes::css::*,
+    ecs::system::EntityCommands,
+    prelude::*,
+    text::{Text2dBounds, TextLayoutInfo},
     time::Stopwatch,
 };
 use character_controller::{CharacterControllerBundle, CharacterControllerPlugin};
-use levels::{LevelEnd, LevelGenerator, MovingPlatform, MovingPlatformType, Spike, SpikeData};
+use levels::{
+    persistent_anchor_system, persistent_collider_constructor_system, Checkpoint, CheckpointData,
+    LevelEnd, LevelGenerator, MovingPlatform, MovingPlatformType, PersistentAnchor,
+    PersistentColliderConstructor, Spike, SpikeData,
+};
 use ui::{main_menu::MainMenuPlugin, pause_menu::PauseMenuPlugin};
 
 mod character_controller;
 mod levels;
 mod ui;
 
-const PLATFORM_SPEED: f32 = 0.5;
 const BOTTOM_WORLD_BOUNDARY: f32 = -500.;
 
 #[derive(Debug, Clone, PartialEq, Eq, Hash, States)]
@@ -67,7 +73,7 @@ struct LevelCompleteEvent;
 
 #[derive(Event)]
 enum LevelRestartEvent {
-    KeepSpikes,
+    RestoreLastSave,
     /// Performs a full reset and spawns the given level index.
     /// We need to add the level id since the state changes aren't committed in the same frame,
     /// meaning setup_level_content doesn't get the correct index directly.
@@ -80,8 +86,22 @@ struct LevelStopwatch(Stopwatch);
 #[derive(Default, Resource)]
 struct DeathCounter(usize);
 
+#[derive(Resource)]
+struct SaveData {
+    scene: Handle<DynamicScene>,
+    position: Vec2,
+}
+
 #[derive(Event)]
 struct DeathEvent;
+
+#[derive(Event)]
+struct SaveEvent {
+    position: Vec2,
+}
+
+#[derive(Event)]
+struct RemoveSaveEvent;
 
 #[derive(Component)]
 struct LevelRoot;
@@ -103,6 +123,15 @@ struct DeathsText;
 
 fn main() {
     App::new()
+        .register_type::<PersistentColliderConstructor>()
+        .register_type::<MovingPlatformType>()
+        .register_type::<MovingPlatform>()
+        .register_type::<LevelEnd>()
+        .register_type::<Text>()
+        .register_type::<TextStyle>()
+        .register_type::<PersistentAnchor>()
+        .register_type::<Text2dBounds>()
+        .register_type::<TextLayoutInfo>()
         .add_plugins((
             DefaultPlugins,
             // 1 meter = 20 pixels
@@ -114,23 +143,35 @@ fn main() {
         .add_event::<LevelCompleteEvent>()
         .add_event::<LevelRestartEvent>()
         .add_event::<DeathEvent>()
+        .add_event::<SaveEvent>()
+        .add_event::<RemoveSaveEvent>()
         .insert_resource(Gravity(Vector::NEG_Y * 1000.))
         .insert_resource(SpikeData::default())
+        .insert_resource(CheckpointData::default())
         .insert_resource(DeathCounter::default())
         .init_resource::<LevelStopwatch>()
         .add_computed_state::<InLevel>()
         .add_computed_state::<IsPaused>()
-        .insert_state(GameState::level(0))
+        .insert_state(GameState::level(1))
         .add_systems(Startup, setup)
         .add_systems(OnEnter(InLevel), setup_level)
         .add_systems(OnEnter(IsPaused::Paused), begin_pause)
         .add_systems(OnExit(IsPaused::Paused), end_pause)
-        .add_systems(OnExit(InLevel), (cleanup_level, cleanup_level_content))
+        .add_systems(
+            OnExit(InLevel),
+            (cleanup_level, cleanup_level_content, remove_save),
+        )
         .add_systems(
             Update,
             (
                 camera_smooth_follow_player,
                 moving_platform_system,
+                (
+                    checkpoint_system,
+                    create_save.pipe(store_save),
+                    checkpoint_load,
+                )
+                    .chain(),
                 (
                     level_complete_condition,
                     on_level_completed,
@@ -143,8 +184,11 @@ fn main() {
         )
         .add_systems(
             PostUpdate,
-            (update_death_counter, update_hud)
-                .chain()
+            (
+                (update_death_counter, update_hud).chain(),
+                persistent_collider_constructor_system,
+                persistent_anchor_system,
+            )
                 .run_if(in_state(IsPaused::Unpaused)),
         )
         .add_systems(Update, pause_system.run_if(in_state(InLevel)))
@@ -249,20 +293,35 @@ fn cleanup_level(
     commands.remove_resource::<LevelStopwatch>();
 }
 
+fn remove_save(
+    mut commands: Commands,
+    save_data: Option<Res<SaveData>>,
+    mut dynamic_scenes: ResMut<Assets<DynamicScene>>,
+) {
+    if let Some(save_data) = save_data {
+        dynamic_scenes.remove(&save_data.scene);
+        commands.remove_resource::<SaveData>();
+    }
+}
+
 fn setup_level_content(
     mut level_restart_reader: EventReader<LevelRestartEvent>,
     level_root: Query<Entity, With<LevelRoot>>,
     spikes: Query<Entity, With<Spike>>,
+    checkpoints: Query<Entity, With<Checkpoint>>,
     mut player: Query<&mut Transform, With<Player>>,
     // The EntityCommands that we get from Commands::spawn() reborrows the Commands, which means
     // we cannot borrow it again when passing it to setup_level. Therefore, we just ask Bevy to
     // give us another 'static Commands lol...
     mut commands: Commands,
     commands2: Commands,
-    meshes: ResMut<Assets<Mesh>>,
-    materials: ResMut<Assets<ColorMaterial>>,
+    mut meshes: ResMut<Assets<Mesh>>,
+    mut materials: ResMut<Assets<ColorMaterial>>,
     spike_data: ResMut<SpikeData>,
+    checkpoint_data: ResMut<CheckpointData>,
     game_state: Res<State<GameState>>,
+    save_data: Option<Res<SaveData>>,
+    mut scene_spawner: ResMut<SceneSpawner>,
 ) {
     // reset level
     let Some(level_restart_event) = level_restart_reader.read().next() else {
@@ -274,35 +333,57 @@ fn setup_level_content(
     }
 
     let mut player = player.single_mut();
-    player.translation = Vec3::ZERO;
 
-    let mut level_idx: Option<u16> = None;
-    if let LevelRestartEvent::FullReset(idx) = level_restart_event {
-        level_idx = Some(*idx);
-        for spike in &spikes {
-            commands.entity(spike).despawn_recursive();
+    match level_restart_event {
+        LevelRestartEvent::RestoreLastSave => {
+            let level_root = commands.spawn((
+                LevelRoot,
+                TransformBundle::default(),
+                VisibilityBundle::default(),
+            ));
+
+            if let Some(save_data) = save_data {
+                player.translation = save_data.position.extend(0.) + Vec3::new(0., 100., 0.);
+                scene_spawner.spawn_dynamic_as_child(save_data.scene.clone_weak(), level_root.id());
+            } else {
+                player.translation = Vec3::ZERO;
+                let GameState::Level { index, .. } = **game_state else {
+                    return;
+                };
+
+                LevelGenerator::setup_level_without_permanent_entities(
+                    commands2,
+                    level_root,
+                    &mut meshes,
+                    &mut materials,
+                    spike_data,
+                    checkpoint_data,
+                    index,
+                );
+            }
+        }
+        LevelRestartEvent::FullReset(index) => {
+            player.translation = Vec3::ZERO;
+            for entity in spikes.iter().chain(checkpoints.iter()) {
+                commands.entity(entity).despawn_recursive();
+            }
+
+            let level_root = commands.spawn((
+                LevelRoot,
+                TransformBundle::default(),
+                VisibilityBundle::default(),
+            ));
+            LevelGenerator::setup_level(
+                commands2,
+                level_root,
+                &mut meshes,
+                &mut materials,
+                spike_data,
+                checkpoint_data,
+                *index,
+            );
         }
     }
-
-    // spawn level entities
-    let Some(level_idx) = level_idx.or_else(|| {
-        if let GameState::Level { index, .. } = **game_state {
-            Some(index)
-        } else {
-            None
-        }
-    }) else {
-        return;
-    };
-
-    let level_root = commands.spawn((
-        LevelRoot,
-        TransformBundle::default(),
-        VisibilityBundle::default(),
-    ));
-    LevelGenerator::setup_level(
-        commands2, level_root, meshes, materials, spike_data, level_idx,
-    );
 }
 
 fn cleanup_level_content(mut commands: Commands, level_root: Query<Entity, With<LevelRoot>>) {
@@ -351,6 +432,9 @@ fn on_level_completed(
     game_state: Res<State<GameState>>,
     mut next_state: ResMut<NextState<GameState>>,
     mut level_restart_writer: EventWriter<LevelRestartEvent>,
+    commands: Commands,
+    save_data: Option<Res<SaveData>>,
+    dynamic_scenes: ResMut<Assets<DynamicScene>>,
 ) {
     if level_complete_reader.read().count() == 0 {
         return;
@@ -363,6 +447,7 @@ fn on_level_completed(
     level_restart_writer.send(LevelRestartEvent::FullReset(index + 1));
     level_stopwatch.0.reset();
     death_counter.0 = 0;
+    remove_save(commands, save_data, dynamic_scenes);
 }
 
 fn death_condition(
@@ -382,13 +467,13 @@ fn death_condition(
 
         *visibility = Visibility::default();
         death_event_writer.send(DeathEvent);
-        level_restart_writer.send(LevelRestartEvent::KeepSpikes);
+        level_restart_writer.send(LevelRestartEvent::RestoreLastSave);
         return;
     }
 
     if player_transform.translation.y <= BOTTOM_WORLD_BOUNDARY {
         death_event_writer.send(DeathEvent);
-        level_restart_writer.send(LevelRestartEvent::KeepSpikes);
+        level_restart_writer.send(LevelRestartEvent::RestoreLastSave);
     }
 }
 
@@ -407,12 +492,12 @@ fn moving_platform_system(
         &mut Transform,
         &MovingPlatformType,
         &mut MovingPlatform,
-        &ShapeHits,
+        &CollidingEntities,
     )>,
     mut rigid_bodies: Query<(&RigidBody, &mut Transform), Without<MovingPlatform>>,
 ) {
-    for (mut transform, ty, mut platform, top_hits) in &mut platforms {
-        if !top_hits.is_empty() {
+    for (mut transform, ty, mut platform, colliding_entities) in &mut platforms {
+        if !colliding_entities.is_empty() {
             platform.active = true;
         }
 
@@ -435,7 +520,7 @@ fn moving_platform_system(
                 transform.translation = a.lerp(*b, platform.t);
 
                 // FIXME: This moves the RigidBody into other colliders and it causes weird stuff :( pls fix
-                for ShapeHitData { entity, .. } in top_hits.iter() {
+                for entity in colliding_entities.iter() {
                     let Ok((rb, mut transform)) = rigid_bodies.get_mut(*entity) else {
                         continue;
                     };
@@ -452,6 +537,101 @@ fn moving_platform_system(
         } else if platform.t <= 0.0 {
             platform.moving_backward = false;
         }
+    }
+}
+
+fn checkpoint_system(
+    player: Query<Entity, With<Player>>,
+    mut checkpoints: Query<(
+        Entity,
+        &Transform,
+        &CollidingEntities,
+        &mut Checkpoint,
+        &mut Handle<ColorMaterial>,
+    )>,
+    checkpoint_data: ResMut<CheckpointData>,
+    mut save_event_writer: EventWriter<SaveEvent>,
+) {
+    let Ok(player) = player.get_single() else {
+        return;
+    };
+    let mut active_checkpoint: Option<Entity> = None;
+    for (entity, transform, colliding_entities, mut checkpoint, mut material) in &mut checkpoints {
+        let is_active = checkpoint.active;
+        if checkpoint.active {
+            checkpoint.active = false;
+            *material = checkpoint_data.default_material().unwrap();
+
+            if active_checkpoint.is_none() {
+                active_checkpoint = Some(entity);
+            }
+        }
+
+        if colliding_entities.iter().any(|e| *e == player) {
+            active_checkpoint = Some(entity);
+            if !is_active {
+                save_event_writer.send(SaveEvent {
+                    position: transform.translation.truncate(),
+                });
+            }
+        }
+    }
+
+    if let Some(cp) = active_checkpoint {
+        let (.., mut checkpoint, mut material) = checkpoints.get_mut(cp).unwrap();
+        checkpoint.active = true;
+        *material = checkpoint_data.active_material().unwrap();
+    }
+}
+
+fn create_save(
+    mut save_event_reader: EventReader<SaveEvent>,
+    level_root: Query<&Children, With<LevelRoot>>,
+    world: &World,
+) -> Option<(Vec2, DynamicScene)> {
+    let Some(SaveEvent { position }) = save_event_reader.read().next() else {
+        return None;
+    };
+    let Ok(level_root_children) = level_root.get_single() else {
+        return None;
+    };
+
+    let dynamic_scene = DynamicSceneBuilder::from_world(world)
+        .deny::<Parent>()
+        .extract_entities(level_root_children.iter().map(|e| *e))
+        .build();
+
+    Some((*position, dynamic_scene))
+}
+
+fn store_save(
+    In(created_save): In<Option<(Vec2, DynamicScene)>>,
+    mut commands: Commands,
+    mut dynamic_scenes: ResMut<Assets<DynamicScene>>,
+    save_data: Option<ResMut<SaveData>>,
+) {
+    let Some((position, dynamic_scene)) = created_save else {
+        return;
+    };
+
+    if let Some(mut save_data) = save_data {
+        dynamic_scenes.remove(&save_data.scene);
+        save_data.scene = dynamic_scenes.add(dynamic_scene);
+        save_data.position = position;
+    } else {
+        commands.insert_resource(SaveData {
+            scene: dynamic_scenes.add(dynamic_scene),
+            position,
+        });
+    }
+}
+
+fn checkpoint_load(
+    keyboard_input: Res<ButtonInput<KeyCode>>,
+    mut level_restart_writer: EventWriter<LevelRestartEvent>,
+) {
+    if keyboard_input.just_pressed(KeyCode::KeyL) {
+        level_restart_writer.send(LevelRestartEvent::RestoreLastSave);
     }
 }
 
