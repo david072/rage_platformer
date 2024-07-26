@@ -1,4 +1,6 @@
-use avian2d::prelude::*;
+use std::f32::consts::FRAC_PI_2;
+
+use avian2d::{math::PI, prelude::*};
 use bevy::{
     color::palettes::css::*,
     ecs::system::EntityCommands,
@@ -22,6 +24,15 @@ const DOOR_SIZE: Vec2 = Vec2::new(30., 50.);
 #[derive(Reflect, Component)]
 #[reflect(Component)]
 pub struct LevelEnd;
+
+#[derive(Default, Clone, Copy)]
+pub enum SpikeDir {
+    #[default]
+    Up,
+    Down,
+    Left,
+    Right,
+}
 
 #[derive(Default, Component)]
 pub struct Spike {
@@ -394,12 +405,23 @@ impl<'a> LevelGenerator<'a> {
         self.level_commands.add_child(id);
     }
 
-    fn spike_base(&mut self, pos: (f32, f32)) -> EntityCommands {
+    fn spike_base(&mut self, pos: (f32, f32), dir: SpikeDir) -> EntityCommands {
+        let (x_off, y_off, rot) = match dir {
+            SpikeDir::Up => (0., 0., 0.),
+            SpikeDir::Down => (0., SPIKE_SIZE.y / 2., PI),
+            SpikeDir::Left => (SPIKE_SIZE.x / 2., SPIKE_SIZE.y / 2., FRAC_PI_2),
+            SpikeDir::Right => (-SPIKE_SIZE.x / 2., SPIKE_SIZE.y / 2., -FRAC_PI_2),
+        };
+
         self.commands.spawn((
             MaterialMesh2dBundle {
                 mesh: Mesh2dHandle(self.spike_data.mesh().unwrap()),
                 material: self.spike_data.material().unwrap(),
-                transform: Transform::from_xyz(pos.0, pos.1, SPIKE_Z),
+                transform: Transform {
+                    translation: Vec3::new(pos.0 + x_off, pos.1 + y_off, SPIKE_Z),
+                    rotation: Quat::from_rotation_z(rot),
+                    ..default()
+                },
                 visibility: Visibility::Hidden,
                 ..default()
             },
@@ -408,37 +430,32 @@ impl<'a> LevelGenerator<'a> {
     }
 
     fn spike(&mut self, pos: (f32, f32)) {
-        if !self.enable_permanent_entities {
-            return;
-        }
-        self.spike_base(pos).insert(Spike::default());
+        self.spike_dir(pos, SpikeDir::default());
     }
 
-    fn spike_group(&mut self, start_x: f32, end_x: f32, y: f32) {
+    fn spike_dir(&mut self, pos: (f32, f32), dir: SpikeDir) {
         if !self.enable_permanent_entities {
             return;
         }
-
-        let mut x = ((end_x - start_x) % SPIKE_SIZE.x) / 2. + start_x;
-        let group = self.current_spike_group;
-        while x <= end_x {
-            self.spike_base((x, y)).insert(Spike { group: Some(group) });
-            x += SPIKE_SIZE.x;
-        }
-
-        self.current_spike_group += 1;
+        self.spike_base(pos, dir).insert(Spike::default());
     }
 
-    fn vertical_spike_group(&mut self, x: f32, start_y: f32, end_y: f32) {
+    fn spike_group(&mut self, start: f32, end: f32, coord2: f32, dir: SpikeDir) {
         if !self.enable_permanent_entities {
             return;
         }
 
-        let mut y = ((end_y - start_y) % SPIKE_SIZE.y) / 2. + start_y;
+        let mut coord1 = ((end - start) % SPIKE_SIZE.x) / 2. + start;
         let group = self.current_spike_group;
-        while y <= end_y {
-            self.spike_base((x, y)).insert(Spike { group: Some(group) });
-            y += SPIKE_SIZE.y;
+        while coord1 <= end {
+            let pos = match dir {
+                SpikeDir::Up | SpikeDir::Down => (coord1, coord2),
+                SpikeDir::Left | SpikeDir::Right => (coord2, coord1),
+            };
+
+            self.spike_base(pos, dir)
+                .insert(Spike { group: Some(group) });
+            coord1 += SPIKE_SIZE.x;
         }
 
         self.current_spike_group += 1;
