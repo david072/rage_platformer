@@ -23,8 +23,10 @@ const DOOR_SIZE: Vec2 = Vec2::new(30., 50.);
 #[reflect(Component)]
 pub struct LevelEnd;
 
-#[derive(Component)]
-pub struct Spike;
+#[derive(Default, Component)]
+pub struct Spike {
+    pub group: Option<usize>,
+}
 
 #[derive(Default, Component)]
 pub struct Checkpoint {
@@ -267,6 +269,7 @@ pub struct LevelGenerator<'a> {
     spike_data: ResMut<'a, SpikeData>,
     checkpoint_data: ResMut<'a, CheckpointData>,
     enable_permanent_entities: bool,
+    current_spike_group: usize,
 }
 
 impl<'a> LevelGenerator<'a> {
@@ -286,6 +289,7 @@ impl<'a> LevelGenerator<'a> {
             spike_data,
             checkpoint_data,
             enable_permanent_entities: true,
+            current_spike_group: 0,
         }
     }
 
@@ -390,10 +394,7 @@ impl<'a> LevelGenerator<'a> {
         self.level_commands.add_child(id);
     }
 
-    fn spike(&mut self, pos: (f32, f32)) {
-        if !self.enable_permanent_entities {
-            return;
-        }
+    fn spike_base(&mut self, pos: (f32, f32)) -> EntityCommands {
         self.commands.spawn((
             MaterialMesh2dBundle {
                 mesh: Mesh2dHandle(self.spike_data.mesh().unwrap()),
@@ -402,9 +403,45 @@ impl<'a> LevelGenerator<'a> {
                 visibility: Visibility::Hidden,
                 ..default()
             },
-            Spike,
             Collider::rectangle(SPIKE_SIZE.x, SPIKE_SIZE.y),
-        ));
+        ))
+    }
+
+    fn spike(&mut self, pos: (f32, f32)) {
+        if !self.enable_permanent_entities {
+            return;
+        }
+        self.spike_base(pos).insert(Spike::default());
+    }
+
+    fn spike_group(&mut self, start_x: f32, end_x: f32, y: f32) {
+        if !self.enable_permanent_entities {
+            return;
+        }
+
+        let mut x = ((end_x - start_x) % SPIKE_SIZE.x) / 2. + start_x;
+        let group = self.current_spike_group;
+        while x <= end_x {
+            self.spike_base((x, y)).insert(Spike { group: Some(group) });
+            x += SPIKE_SIZE.x;
+        }
+
+        self.current_spike_group += 1;
+    }
+
+    fn vertical_spike_group(&mut self, x: f32, start_y: f32, end_y: f32) {
+        if !self.enable_permanent_entities {
+            return;
+        }
+
+        let mut y = ((end_y - start_y) % SPIKE_SIZE.y) / 2. + start_y;
+        let group = self.current_spike_group;
+        while y <= end_y {
+            self.spike_base((x, y)).insert(Spike { group: Some(group) });
+            y += SPIKE_SIZE.y;
+        }
+
+        self.current_spike_group += 1;
     }
 
     fn checkpoint(&mut self, pos: (f32, f32)) {

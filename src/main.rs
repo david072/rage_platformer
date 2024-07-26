@@ -98,8 +98,10 @@ struct SaveData {
     position: Vec2,
 }
 
-#[derive(Event)]
-struct DeathEvent;
+#[derive(Default, Event)]
+struct DeathEvent {
+    spike: Option<Entity>,
+}
 
 #[derive(Event)]
 struct CheckpointSaveEvent {
@@ -186,6 +188,7 @@ fn main() {
                     level_complete_condition,
                     on_level_completed,
                     death_condition,
+                    update_spike_visibility,
                     setup_level_content,
                 )
                     .chain(),
@@ -493,7 +496,7 @@ fn on_level_completed(
 
 fn death_condition(
     player: Query<(Entity, &Transform), With<Player>>,
-    mut spikes: Query<(&CollidingEntities, &mut Visibility), With<Spike>>,
+    mut spikes: Query<(Entity, &CollidingEntities), With<Spike>>,
     mut death_event_writer: EventWriter<DeathEvent>,
     mut level_restart_writer: EventWriter<LevelRestartEvent>,
 ) {
@@ -501,20 +504,42 @@ fn death_condition(
         return;
     };
 
-    for (colliding_entities, mut visibility) in &mut spikes {
+    for (entity, colliding_entities) in &mut spikes {
         if !colliding_entities.contains(&player) {
             continue;
         }
 
-        *visibility = Visibility::default();
-        death_event_writer.send(DeathEvent);
+        death_event_writer.send(DeathEvent {
+            spike: Some(entity),
+        });
         level_restart_writer.send(LevelRestartEvent::RestoreLastSave);
         return;
     }
 
     if player_transform.translation.y <= BOTTOM_WORLD_BOUNDARY {
-        death_event_writer.send(DeathEvent);
+        death_event_writer.send(DeathEvent::default());
         level_restart_writer.send(LevelRestartEvent::RestoreLastSave);
+    }
+}
+
+fn update_spike_visibility(
+    mut death_event_reader: EventReader<DeathEvent>,
+    mut spikes: Query<(&mut Visibility, &Spike)>,
+) {
+    for DeathEvent { spike } in death_event_reader.read() {
+        let Some(spike_entity) = spike else {
+            continue;
+        };
+
+        let (mut visibility, spike) = spikes.get_mut(*spike_entity).unwrap();
+        *visibility = Visibility::default();
+
+        if let Spike { group: Some(group) } = *spike {
+            spikes
+                .iter_mut()
+                .filter(|(_, s)| s.group.map(|g| g == group).unwrap_or(false))
+                .for_each(|(mut visibility, _)| *visibility = Visibility::default());
+        }
     }
 }
 
